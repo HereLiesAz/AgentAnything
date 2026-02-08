@@ -1,216 +1,235 @@
-// Defines the reality for both the oppressor (Agent) and the oppressed (Target).
-
 let role = null;
 let myTabId = null;
-let observer = null;
+let targetMap = [];
 
-// --- Communication Hub ---
+// --- Messaging Architecture ---
+
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
-  if (msg.action === "INIT_AGENT") {
-    role = "AGENT";
-    initAgent();
-  } else if (msg.action === "INIT_TARGET") {
-    role = "TARGET";
-    myTabId = msg.tabId; // Self-awareness is painful.
-    initTarget();
-  } else if (msg.action === "EXECUTE_COMMAND" && role === "TARGET") {
-    executeTargetCommand(msg.command);
-  } else if (msg.action === "INJECT_OBSERVATION" && role === "AGENT") {
-    injectObservationToAgent(msg.sourceId, msg.content);
-  } else if (msg.action === "DEMOTED") {
-    location.reload(); // Hard reset the simulation.
+  switch (msg.action) {
+    case "INIT_AGENT":
+      role = "AGENT";
+      initAgentUI();
+      break;
+    case "INIT_TARGET":
+      role = "TARGET";
+      myTabId = msg.tabId;
+      initTargetLogic();
+      break;
+    case "EXECUTE_COMMAND":
+      if (role === "TARGET") executeCommand(msg.command);
+      break;
+    case "INJECT_OBSERVATION":
+      if (role === "AGENT") injectObservation(msg.sourceId, msg.content);
+      break;
   }
 });
 
-// --- AGENT LOGIC ---
+// --- AGENT LOGIC (The Puppet Master) ---
 
-function initAgent() {
-  console.log("AgentAnything: I am the Agent.");
+function initAgentUI() {
+  console.log("%c AGENT ACTIVATED ", "background: #000; color: #0f0; font-size: 20px;");
   
-  // Create an overlay to show incoming data, because invisible processes are boring.
-  const overlay = document.createElement('div');
-  overlay.id = 'aa-agent-overlay';
-  overlay.style.cssText = `
-    position: fixed; bottom: 10px; right: 10px; width: 300px; height: 200px;
-    background: #000; border: 1px solid #444; color: #0f0; font-family: monospace;
-    font-size: 10px; overflow-y: auto; padding: 5px; z-index: 99999; opacity: 0.8;
-    pointer-events: none;
-  `;
-  document.body.appendChild(overlay);
-
-  // Initial prompt injection.
   const prompt = `
-[SYSTEM: YOU ARE NOW AN AGENT WITH TOOLS.]
-You have access to other browser tabs. 
-Protocol: To perform an action, output a JSON block like this:
+[SYSTEM: YOU ARE AN AGENT. ACCESSING EXTERNAL TOOLS.]
+I have connected you to another browser tab.
+You can control it using the following JSON format.
+Output ONLY raw JSON when taking action.
+
+COMMAND FORMAT:
 \`\`\`json
 {
-  "targetTabId": <ID>,
+  "tool": "interact",
+  "id": "ELEMENT_ID", 
   "action": "click" | "type" | "read",
-  "selector": "<CSS_SELECTOR>",
-  "value": "<TEXT_IF_TYPING>"
+  "value": "your text here" (only for type)
 }
 \`\`\`
-Waiting for targets...
+
+WAITING FOR TARGET CONNECTION...
   `;
+  
   copyToClipboard(prompt);
-  logToOverlay("System prompt copied to clipboard. Paste into AI chat.");
+  notify("System Prompt Copied. Paste this into the AI to begin subjugation.");
 
-  // Watch for AI output. 
-  // We use a MutationObserver on the body because every AI site is different 
-  // and I refuse to write specific parsers for all of them.
-  observeAgentOutput();
+  // Watch for AI output
+  observeAIOutput();
 }
 
-function observeAgentOutput() {
-  const config = { childList: true, subtree: true, characterData: true };
+function observeAIOutput() {
+  // Brute force observer. 
   const observer = new MutationObserver((mutations) => {
-    // Debounce this madness.
-    if (this.debounceTimer) clearTimeout(this.debounceTimer);
-    this.debounceTimer = setTimeout(() => {
-        parseLastResponse();
-    }, 1000);
+    // Only parse if we see the closing code block, indicating completion
+    const bodyText = document.body.innerText;
+    if (bodyText.includes('```json') && bodyText.includes('```')) {
+        parseCommands(bodyText);
+    }
   });
-  observer.observe(document.body, config);
+  observer.observe(document.body, { childList: true, subtree: true, characterData: true });
 }
 
-function parseLastResponse() {
-  // We scan the entire body for our JSON signature. 
-  // It's inefficient. It's brute force. It works.
-  // We specifically look for the *last* occurrence of a JSON block.
-  
-  const text = document.body.innerText;
-  const regex = /```json\s*(\{[\s\S]*?"action"[\s\S]*?\})\s*```/g;
-  let match;
-  let lastMatch = null;
-  
-  while ((match = regex.exec(text)) !== null) {
-    lastMatch = match[1];
-  }
+let lastCommandSignature = "";
 
-  if (lastMatch) {
+function parseCommands(text) {
+  // Regex to extract JSON blocks
+  const regex = /```json\s*(\{[\s\S]*?\})\s*```/g;
+  let match;
+  while ((match = regex.exec(text)) !== null) {
     try {
-      const command = JSON.parse(lastMatch);
-      // Prevent infinite loops by checking if we just executed this. 
-      // We rely on the AI to not repeat the exact same JSON block endlessly, 
-      // which is a bold assumption given their propensity for hallucination.
-      const cmdHash = JSON.stringify(command);
-      if (window.lastCommandHash !== cmdHash) {
-        window.lastCommandHash = cmdHash;
-        logToOverlay(`Sending command to Tab ${command.targetTabId}...`);
-        chrome.runtime.sendMessage({ action: "AGENT_COMMAND", payload: command });
+      const json = JSON.parse(match[1]);
+      const sig = JSON.stringify(json);
+      
+      // Prevent loops: only execute if we haven't seen this exact command recently
+      if (sig !== lastCommandSignature) {
+        lastCommandSignature = sig;
+        console.log("Dispatching command:", json);
+        chrome.runtime.sendMessage({ 
+          action: "AGENT_COMMAND", 
+          payload: { ...json, targetTabId: window.activeTargetId } 
+        });
+        notify(`Sent command: ${json.action} -> ${json.id}`);
       }
     } catch (e) {
-      // JSON parse error. The AI is speaking gibberish.
+      console.error("Agent hallucinated invalid JSON.", e);
     }
   }
 }
 
-function injectObservationToAgent(sourceId, content) {
-  logToOverlay(`Update from Tab ${sourceId}: ${content.substring(0, 50)}...`);
+function injectObservation(sourceId, content) {
+  // Store the target ID so we know where to send commands
+  window.activeTargetId = sourceId;
+
+  // We need to feed this back to the AI.
+  // Method: Create a floating, copyable status window.
+  // Direct injection into third-party textareas is flaky (React/ShadowDOM blocking).
   
-  // Try to find the main textarea.
-  const input = document.querySelector('textarea, div[contenteditable="true"]');
-  if (input) {
-    const message = `\n[SYSTEM UPDATE FROM TAB ${sourceId}]:\n${content}\n`;
-    
-    // Attempting to modify react/angular/vue inputs directly usually fails.
-    // We copy to clipboard as a fallback fallback.
-    // But let's try to be clever with execCommand.
-    input.focus();
-    document.execCommand('insertText', false, message); 
+  let obsWin = document.getElementById('aa-observation-deck');
+  if (!obsWin) {
+    obsWin = document.createElement('div');
+    obsWin.id = 'aa-observation-deck';
+    obsWin.style.cssText = `
+      position: fixed; top: 0; right: 0; width: 350px; background: #000; color: #0f0;
+      border-left: 2px solid #333; height: 100vh; z-index: 999999; padding: 10px;
+      font-family: monospace; font-size: 11px; white-space: pre-wrap; overflow-y: auto;
+    `;
+    document.body.appendChild(obsWin);
   }
-}
 
-function logToOverlay(text) {
-  const el = document.getElementById('aa-agent-overlay');
-  if (el) {
-    const line = document.createElement('div');
-    line.textContent = `> ${text}`;
-    el.appendChild(line);
-    el.scrollTop = el.scrollHeight;
-  }
-}
-
-function copyToClipboard(text) {
-  const el = document.createElement('textarea');
-  el.value = text;
-  document.body.appendChild(el);
-  el.select();
-  document.execCommand('copy');
-  document.body.removeChild(el);
-}
-
-// --- TARGET LOGIC ---
-
-function initTarget() {
-  console.log("AgentAnything: I am a Target.");
+  obsWin.innerText = `[UPDATE FROM TAB ${sourceId}]\n\n${content}\n\n[END UPDATE]`;
   
-  // Scan the page and report the structure.
-  reportPageStructure();
-
-  // Watch for changes.
-  const config = { childList: true, subtree: true };
-  const observer = new MutationObserver(() => {
-    if (this.targetDebounce) clearTimeout(this.targetDebounce);
-    this.targetDebounce = setTimeout(() => {
-      reportPageStructure("ASYNC_UPDATE");
-    }, 2000);
-  });
-  observer.observe(document.body, config);
+  // Flash effect
+  obsWin.style.backgroundColor = "#111";
+  setTimeout(() => obsWin.style.backgroundColor = "#000", 100);
 }
 
-function reportPageStructure(trigger = "INITIAL") {
-  // We boil the page down to actionable elements. 
-  // We assign temporary IDs to them via data attributes so the Agent can reference them.
-  
-  const interactables = document.querySelectorAll('a, button, input, textarea, [role="button"]');
-  let map = [];
-  
-  interactables.forEach((el, index) => {
-    // Generate a stable-ish ID based on path if possible, or just index for this session.
-    const id = `aa-node-${index}`;
-    el.setAttribute('data-aa-id', id);
-    
-    // Visual debugger for the user so they know what's touchable.
-    el.style.outline = "1px dashed rgba(255, 0, 0, 0.3)";
-    
-    let desc = el.innerText || el.placeholder || el.name || el.id || "Unlabeled";
-    desc = desc.substring(0, 50).replace(/\s+/g, ' ');
-    
-    map.push(`{ "selector": "[data-aa-id='${id}']", "type": "${el.tagName}", "text": "${desc}" }`);
-  });
+// --- TARGET LOGIC (The Tool) ---
 
-  const schema = `
-Target ID: ${myTabId}
+function initTargetLogic() {
+  console.log("%c TARGET ACQUIRED ", "background: #000; color: #f00; font-size: 20px;");
+  
+  // 1. Map the page
+  const map = Heuristics.generateMap();
+  targetMap = map; // Cache it
+  
+  // 2. Identify Content Area for observation
+  const contentNode = Heuristics.findMainContent();
+  
+  // 3. Build the Schema for the Agent
+  const toolSchema = map.map(item => {
+    return `ID: "${item.id}" | Type: ${item.tag} | Text: "${item.text}" | Score: ${item.score.toFixed(1)}`;
+  }).join('\n');
+
+  const fullReport = `
+TARGET CONNECTED: ${document.title}
 URL: ${window.location.href}
-Trigger: ${trigger}
-Interactive Elements:
-[
-  ${map.join(',\n  ')}
-]
+
+AVAILABLE INTERFACE ELEMENTS (Sorted by Relevance):
+---------------------------------------------------
+${toolSchema}
+---------------------------------------------------
+INSTRUCTIONS:
+To search or chat, look for 'input' or 'textarea' with high scores.
+To submit, look for 'button' with text like 'search' or 'send'.
   `;
+
+  // Send initial state
+  chrome.runtime.sendMessage({ action: "TARGET_UPDATE", payload: fullReport });
+
+  // 4. Set up observers on the CONTENT NODE only (Performance)
+  const observer = new MutationObserver(() => {
+    // Debounce updates
+    if (window.debounceUpdate) clearTimeout(window.debounceUpdate);
+    window.debounceUpdate = setTimeout(() => {
+        // We only send back the text content of the main area
+        // to avoid overwhelming the Agent's context window.
+        const freshContent = contentNode.innerText.substring(0, 2000); // Token limit protection
+        chrome.runtime.sendMessage({ 
+            action: "TARGET_UPDATE", 
+            payload: `[ASYNC PAGE UPDATE]:\n${freshContent}...` 
+        });
+    }, 1500);
+  });
   
-  chrome.runtime.sendMessage({ action: "TARGET_UPDATE", payload: schema });
+  observer.observe(contentNode, { childList: true, subtree: true, characterData: true });
 }
 
-function executeTargetCommand(cmd) {
-  const el = document.querySelector(cmd.selector);
+function executeCommand(cmd) {
+  // Find element by the ID we assigned
+  const item = targetMap.find(i => i.id === cmd.id);
+  const el = document.querySelector(`[data-aa-id="${cmd.id}"]`); // Re-query to be safe
+
   if (!el) {
-    chrome.runtime.sendMessage({ action: "TARGET_UPDATE", payload: `Error: Element ${cmd.selector} not found.` });
+    chrome.runtime.sendMessage({ action: "TARGET_UPDATE", payload: "ERROR: Element not found. DOM may have shifted." });
+    // Trigger re-map?
     return;
   }
 
-  if (cmd.action === "click") {
-    el.click();
-    chrome.runtime.sendMessage({ action: "TARGET_UPDATE", payload: `Clicked ${cmd.selector}` });
-  } else if (cmd.action === "type") {
-    el.value = cmd.value;
-    el.dispatchEvent(new Event('input', { bubbles: true }));
-    el.dispatchEvent(new Event('change', { bubbles: true }));
-    chrome.runtime.sendMessage({ action: "TARGET_UPDATE", payload: `Typed "${cmd.value}" into ${cmd.selector}` });
-  } else if (cmd.action === "read") {
-    const text = el.innerText || el.value;
-    chrome.runtime.sendMessage({ action: "TARGET_UPDATE", payload: `Read from ${cmd.selector}: ${text}` });
+  // Highlight action
+  const originalBorder = el.style.border;
+  el.style.border = "2px solid #0f0";
+  setTimeout(() => el.style.border = originalBorder, 500);
+
+  try {
+    if (cmd.action === "click") {
+      el.click();
+      // Also try sending Enter key if it's a button, sometimes click is intercepted
+      el.dispatchEvent(new KeyboardEvent('keydown', {'key': 'Enter'}));
+    } 
+    else if (cmd.action === "type") {
+      el.value = cmd.value;
+      el.innerText = cmd.value; // Fallback
+      // React/Angular State Hack:
+      // These frameworks track value in internal state, not just DOM.
+      // We must trigger input events.
+      const event = new Event('input', { bubbles: true });
+      el.dispatchEvent(event);
+      const change = new Event('change', { bubbles: true });
+      el.dispatchEvent(change);
+    }
+    else if (cmd.action === "read") {
+        // Handled by default update, but specific read can be useful
+    }
+  } catch (err) {
+    chrome.runtime.sendMessage({ action: "TARGET_UPDATE", payload: `ERROR EXECUTING ${cmd.action}: ${err.message}` });
   }
+}
+
+// Utils
+function notify(msg) {
+  const n = document.createElement('div');
+  n.innerText = msg;
+  n.style.cssText = "position:fixed;top:10px;left:50%;transform:translateX(-50%);background:red;color:white;padding:5px;z-index:999999;";
+  document.body.appendChild(n);
+  setTimeout(() => n.remove(), 3000);
+}
+
+function copyToClipboard(text) {
+    navigator.clipboard.writeText(text).catch(err => {
+        // Fallback for non-secure contexts
+        const textArea = document.createElement("textarea");
+        textArea.value = text;
+        document.body.appendChild(textArea);
+        textArea.select();
+        document.execCommand('copy');
+        document.body.removeChild(textArea);
+    });
 }
