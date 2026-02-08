@@ -281,6 +281,13 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
         // Clear session storage; getState() will return defaults automatically
         await chrome.storage.session.clear();
+        await chrome.storage.session.remove(Object.keys(DEFAULT_STATE));
+        await updateState(DEFAULT_STATE);
+    }
+
+    // REMOTE_INJECT support for Popup
+    if (msg.action === "REMOTE_INJECT") {
+         await handleUserPrompt(msg.payload);
     }
 
     // REMOTE_INJECT support for Popup
