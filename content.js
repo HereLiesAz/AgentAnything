@@ -105,15 +105,32 @@ function activateGenesisMode() {
     isWaitingForGenesisInput = true;
     setStatus("GENESIS MODE: TYPE & CLICK SUBMIT", "neon");
 
-    // Highlight best input immediately
+    // Highlight best input immediately AND aggressively poll
     const Heuristics = window.AA_Heuristics;
-    const input = Heuristics.findBestInput();
-    if (input) {
-        input.style.outline = "3px solid #00ff00";
-        input.placeholder = "TYPE COMMAND HERE & CLICK SEND BUTTON...";
-        input.focus();
-        activeInput = input;
+
+    function highlightInput() {
+        if (!isWaitingForGenesisInput) return; // Stop if captured
+        const input = Heuristics.findBestInput();
+        if (input) {
+            input.style.outline = "3px solid #00ff00";
+            // Only set placeholder if it's empty to avoid overwriting user typing if they started
+            if (!input.value) input.placeholder = "TYPE COMMAND HERE & CLICK SEND BUTTON...";
+            // We focus once, but don't steal focus repeatedly if user clicks away
+            if (document.activeElement !== input && !activeInput) {
+                input.focus();
+                activeInput = input;
+            }
+        }
     }
+
+    highlightInput(); // Run once immediately
+    const pollInterval = setInterval(() => {
+        if (!isWaitingForGenesisInput) {
+            clearInterval(pollInterval);
+        } else {
+            highlightInput();
+        }
+    }, 500); // Poll every 500ms until captured
 
     // Disable Enter Key during Genesis to force click
     window.addEventListener('keydown', (e) => {
