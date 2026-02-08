@@ -295,6 +295,7 @@ function processQueue() {
     });
 }
 
+// VISUAL TYPING ENGINE
 async function visualTypeAndSend(text, retries = 0, callback) {
     const input = Heuristics.findBestInput();
     
@@ -334,6 +335,7 @@ async function visualTypeAndSend(text, retries = 0, callback) {
             await new Promise(r => setTimeout(r, 10)); 
         }
 
+        // Final State Commitment
         ['beforeinput', 'input', 'change'].forEach(evt => {
             input.dispatchEvent(new Event(evt, { bubbles: true, cancelable: true }));
         });
@@ -342,14 +344,33 @@ async function visualTypeAndSend(text, retries = 0, callback) {
         console.error("Injection failed", e);
     }
 
+    // THE NUCLEAR SUBMIT SEQUENCE
     setTimeout(() => {
         const sendBtn = Heuristics.findSendButton();
+        
+        // 1. Try Clicking Button
         if (sendBtn && !sendBtn.disabled) {
             sendBtn.click();
-        } else {
-            input.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, keyCode: 13, key: 'Enter' }));
-            input.dispatchEvent(new KeyboardEvent('keyup', { bubbles: true, keyCode: 13, key: 'Enter' }));
+            // Trigger specific React/Framework listeners that might rely on mouse events
+            sendBtn.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true, view: window }));
+            sendBtn.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true, view: window }));
         }
+        
+        // 2. Try Hammering Enter (Always do this as backup)
+        const keyConfig = { bubbles: true, cancelable: true, keyCode: 13, key: 'Enter', code: 'Enter', which: 13 };
+        input.dispatchEvent(new KeyboardEvent('keydown', keyConfig));
+        input.dispatchEvent(new KeyboardEvent('keypress', keyConfig));
+        input.dispatchEvent(new KeyboardEvent('keyup', keyConfig));
+        
+        // 3. Try Native Form Submit
+        if (input.form) {
+             if (input.form.requestSubmit) {
+                 input.form.requestSubmit();
+             } else {
+                 input.form.submit();
+             }
+        }
+
         if (callback) callback();
     }, 500);
 }
