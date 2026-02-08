@@ -1,8 +1,25 @@
 // STATE MANAGEMENT
 let agentTabId = null;
 let targetTabIds = new Set();
-let messageQueue = []; // FIFO Queue: { source: "USER"|"TARGET", content: "..." }
-let isAgentBusy = false; // The Global Lock
+let messageQueue = []; 
+let isAgentBusy = false; 
+
+// THE "GHOST" PROMPT - Automatically prepended to every transmission.
+const SYSTEM_PROTOCOL = `
+[SYSTEM HOST]: CONNECTED
+[PROTOCOL]: STRICT JSON-RPC
+[ROLE]: You are AgentAnything. You control a remote browser tab.
+
+[COMMANDS]:
+1. INTERACT: \`\`\`json { "tool": "interact", "id": "...", "action": "click"|"type", "value": "..." } \`\`\`
+2. BROWSER:  \`\`\`json { "tool": "browser", "action": "refresh"|"back"|"find", "value": "..." } \`\`\`
+
+[RULES]:
+1. Analyze the [INCOMING TRANSMISSION].
+2. Output JSON commands if action is required.
+3. CRITICAL: You MUST end your response with the strictly distinct token: "[WAITING]"
+4. The system will NOT send you new data until it sees "[WAITING]".
+`;
 
 chrome.runtime.onInstalled.addListener(() => {
   chrome.storage.session.setAccessLevel({ accessLevel: 'TRUSTED_AND_UNTRUSTED_CONTEXTS' }); 
@@ -10,7 +27,8 @@ chrome.runtime.onInstalled.addListener(() => {
 
 // --- QUEUE LOGIC ---
 function addToQueue(source, content) {
-    console.log(`[Queue] Adding item from ${source}`);
+    // Avoid duplicate queue items if the target spams updates? 
+    // For now, we trust the flow.
     messageQueue.push({ source, content, timestamp: Date.now() });
     processQueue();
 }
@@ -18,31 +36,29 @@ function addToQueue(source, content) {
 function processQueue() {
     if (isAgentBusy || !agentTabId || messageQueue.length === 0) return;
 
-    // Lock the Agent
     isAgentBusy = true;
-    
-    // Get next item
     const item = messageQueue.shift();
     
-    // Construct Payload
-    const payload = `
+    // THE AUTO-WRAPPER
+    const finalPayload = `
+${SYSTEM_PROTOCOL}
+
 [INCOMING TRANSMISSION]
 SOURCE: ${item.source}
 TIMESTAMP: ${new Date(item.timestamp).toLocaleTimeString()}
 --------------------------------------------------
 ${item.content}
 --------------------------------------------------
-[INSTRUCTION]: Process this update. Output JSON commands if needed. 
-YOU MUST END YOUR RESPONSE WITH THE TEXT: "[WAITING]"
+[INSTRUCTION]: Process. Remember to end with "[WAITING]".
 `;
 
-    // Send to Agent
-    console.log(`[Queue] Dispatching to Agent (Queue Size: ${messageQueue.length})`);
+    console.log(`[Queue] Dispatching ${item.source} to Agent`);
+    
     chrome.tabs.sendMessage(agentTabId, { 
         action: "INJECT_PROMPT", 
-        payload: payload 
+        payload: finalPayload 
     }).catch(err => {
-        console.error("Agent unreachable, releasing lock.", err);
+        console.warn("Agent unreachable. Releasing lock.");
         isAgentBusy = false;
     });
 }
@@ -52,52 +68,43 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   (async () => {
     const tabId = sender.tab ? sender.tab.id : null;
 
-    // 1. ROLE ASSIGNMENT
     if (msg.action === "ASSIGN_ROLE") {
       if (msg.role === "AGENT") {
         agentTabId = msg.tabId;
         targetTabIds.delete(tabId);
-        messageQueue = []; // Clear queue on new agent
+        messageQueue = [];
         isAgentBusy = false;
-        console.log(`[System] Agent Assigned: ${tabId}`);
         chrome.tabs.sendMessage(tabId, { action: "INIT_AGENT" });
       } else {
         targetTabIds.add(msg.tabId);
         if (agentTabId === msg.tabId) agentTabId = null;
-        console.log(`[System] Target Assigned: ${tabId}`);
         chrome.tabs.sendMessage(tabId, { action: "INIT_TARGET" });
       }
-      return;
     }
 
-    // 2. AGENT SIGNALING "I AM DONE"
+    // THE UNLOCK KEY
     if (msg.action === "AGENT_READY") {
-        console.log("[System] Agent signaled READY. Releasing lock in 2s...");
+        console.log("[System] Agent signaled READY. Resting...");
         setTimeout(() => {
             isAgentBusy = false;
-            processQueue(); // Try to send next item
-        }, 2000); // 2 Second Safety Delay
+            processQueue(); 
+        }, 1000); 
     }
 
-    // 3. INPUTS TO QUEUE
     if (msg.action === "QUEUE_INPUT") {
         addToQueue(msg.source || "USER", msg.payload);
     }
 
-    // 4. TARGET UPDATES TO QUEUE
-    if (msg.action === "TARGET_UPDATE") {
-        // Only queue if it's a meaningful update or specifically requested
-        // For high-frequency updates, we might want to debounce here, 
-        // but for now, we trust the Target's debouncer.
-        addToQueue("TARGET", msg.payload.content);
-        
-        // Also forward immediate state for the parser (if needed)
-        // chrome.storage.session.set({ lastTargetPayload: msg.payload });
+    // Handle Remote Inject from Popup via Queue
+    if (msg.action === "REMOTE_INJECT") {
+         addToQueue("ADMIN", msg.payload);
     }
 
-    // 5. AGENT COMMANDS (Execution)
+    if (msg.action === "TARGET_UPDATE") {
+        addToQueue("TARGET", msg.payload.content);
+    }
+
     if (msg.action === "AGENT_COMMAND") {
-        // Execute on ALL targets for now, or specific one if ID provided
         targetTabIds.forEach(tId => {
             chrome.tabs.sendMessage(tId, { action: "EXECUTE_COMMAND", command: msg.payload });
         });
@@ -109,8 +116,6 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         messageQueue = [];
         isAgentBusy = false;
     }
-
-    if (msg.action === "HELLO") { /* Heartbeat, ignore */ }
 
   })();
   return true;
