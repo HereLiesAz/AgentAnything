@@ -5,6 +5,9 @@ let role = null;
 let lastBodyLen = 0;
 let bootInterval = null;
 let activeInput = null; 
+let isWaitingForGenesisInput = true;
+let cachedSendButton = null;
+let cachedInput = null;
 
 // --- BOOTSTRAPPER ---
 function boot() {
@@ -78,6 +81,9 @@ function startMessaging() {
                 role = "AGENT";
                 initAgent();
                 break;
+            case "GENESIS_MODE_ACTIVE":
+                if (role === "AGENT") activateGenesisMode();
+                break;
             case "INIT_TARGET":
                 role = "TARGET";
                 initTarget();
@@ -95,27 +101,58 @@ function startMessaging() {
     });
 }
 
+function activateGenesisMode() {
+    isWaitingForGenesisInput = true;
+    setStatus("GENESIS MODE: TYPE & CLICK SUBMIT", "neon");
+
+    // Highlight best input immediately AND aggressively poll
+    const Heuristics = window.AA_Heuristics;
+
+    function highlightInput() {
+        if (!isWaitingForGenesisInput) return; // Stop if captured
+        const input = Heuristics.findBestInput();
+        if (input) {
+            input.style.outline = "3px solid #00ff00";
+            // Only set placeholder if it's empty to avoid overwriting user typing if they started
+            if (!input.value) input.placeholder = "TYPE COMMAND HERE & CLICK SEND BUTTON...";
+            // We focus once, but don't steal focus repeatedly if user clicks away
+            if (document.activeElement !== input && !activeInput) {
+                input.focus();
+                activeInput = input;
+            }
+        }
+    }
+
+    highlightInput(); // Run once immediately
+    const pollInterval = setInterval(() => {
+        if (!isWaitingForGenesisInput) {
+            clearInterval(pollInterval);
+        } else {
+            highlightInput();
+        }
+    }, 500); // Poll every 500ms until captured
+
+    // Disable Enter Key during Genesis to force click
+    window.addEventListener('keydown', handleGenesisKeydown, true);
+}
+
+function handleGenesisKeydown(e) {
+    if (isWaitingForGenesisInput && e.key === 'Enter') {
+        e.preventDefault();
+        e.stopPropagation();
+        setStatus("USE MOUSE TO CLICK SEND", "red");
+    }
+}
+
 function initAgent() {
-    setStatus("AGENT: READY", "blue");
+    setStatus("AGENT: ASSIGNED", "blue");
     const Heuristics = window.AA_Heuristics;
 
     window.addEventListener('focus', (e) => {
         if (['INPUT','TEXTAREA'].includes(e.target.tagName) || e.target.isContentEditable) {
             activeInput = e.target;
-        }
-    }, true);
-    
-    // ENTER KEY TRAP
-    window.addEventListener('keydown', (e) => {
-        if (e.key === 'Enter' && !e.shiftKey) {
-            const el = e.target;
-            if (['INPUT','TEXTAREA'].includes(el.tagName) || el.isContentEditable) {
-                const val = el.value || el.innerText;
-                if (val && val.trim().length > 0) {
-                    e.preventDefault(); e.stopPropagation(); e.stopImmediatePropagation();
-                    triggerInterception(val, el);
-                }
-            }
+            // Maintain highlight if in genesis mode
+            if (isWaitingForGenesisInput) e.target.style.outline = "3px solid #00ff00";
         }
     }, true);
 
@@ -130,7 +167,13 @@ function initAgent() {
         ));
 
         if (btn) {
+            // Cache the button AND input during Genesis for reliable re-injection
             const input = activeInput || Heuristics.findBestInput();
+
+            if (isWaitingForGenesisInput) {
+                cachedSendButton = btn;
+                cachedInput = input;
+            }
             const val = input ? (input.value || input.innerText) : "";
             
             if (val && val.trim().length > 0) {
@@ -144,18 +187,59 @@ function initAgent() {
 }
 
 function triggerInterception(text, inputEl) {
+    // Only capture if we are waiting for input or if we are already running loop
+    // But actually, we always capture inputs on Agent tab to feed them into the loop.
+
     if (inputEl) {
         inputEl.style.outline = "3px solid #00ff00"; // NEON GREEN
-        inputEl.value = ""; 
+
+        // Improved React/Vue handling
+        try {
+            const descriptor = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(inputEl), 'value');
+            if (descriptor && descriptor.set) {
+                 descriptor.set.call(inputEl, "");
+            } else {
+                 inputEl.value = "";
+            }
+        } catch(e) {
+             inputEl.value = "";
+        }
+
         if(inputEl.innerText) inputEl.innerText = "";
+
+        inputEl.dispatchEvent(new InputEvent('input', { bubbles: true }));
+        inputEl.dispatchEvent(new Event('change', { bubbles: true }));
     }
-    setStatus("INTERCEPTED", "neon");
-    chrome.runtime.sendMessage({ action: "QUEUE_INPUT", source: "USER", payload: text });
+
+    if (isWaitingForGenesisInput) {
+        setStatus("GENESIS PROMPT CAPTURED", "neon");
+        inputEl.style.outline = ""; // Remove green outline immediately
+        isWaitingForGenesisInput = false; // Lock UX
+
+        // Clean up Genesis listeners
+        window.removeEventListener('keydown', handleGenesisKeydown, true);
+
+        // Disable interactions except scrolling
+        const style = document.createElement('style');
+        style.id = 'aa-lock-style';
+        style.textContent = `
+            body * { pointer-events: none !important; }
+            body, html { pointer-events: auto !important; }
+            ::-webkit-scrollbar { width: 10px; }
+            ::-webkit-scrollbar-thumb { background: #555; }
+        `;
+        document.head.appendChild(style);
+
+        chrome.runtime.sendMessage({ action: "GENESIS_INPUT_CAPTURED", payload: text });
+    } else {
+        setStatus("INTERCEPTED", "neon");
+        chrome.runtime.sendMessage({ action: "QUEUE_INPUT", source: "USER", payload: text });
+    }
 }
 
 function injectAgentPrompt(text) {
     const Heuristics = window.AA_Heuristics;
-    const input = Heuristics.findBestInput();
+    const input = cachedInput || Heuristics.findBestInput();
     
     if (!input) {
         console.error("Input not found");
@@ -169,24 +253,33 @@ function injectAgentPrompt(text) {
     input.dispatchEvent(new InputEvent('input', { bubbles: true }));
 
     setTimeout(() => {
-        const btn = Heuristics.findSendButton();
-        if (btn) btn.click();
-        else input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', keyCode: 13, bubbles: true }));
+        const btn = cachedSendButton || Heuristics.findSendButton();
+        if (btn) {
+            console.log("[AgentAnything] Clicking send button:", btn);
+            btn.click();
+        } else {
+            console.warn("[AgentAnything] Send button not found. Using Enter fallback.");
+            input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', keyCode: 13, bubbles: true }));
+        }
         setStatus("AGENT: WORKING", "red");
-    }, 500);
+    }, 50); // Reduced delay for immediate execution
 }
 
 function observeAgentOutput() {
+    let debounceTimer = null;
     const observer = new MutationObserver(() => {
-        const bodyText = document.body.innerText;
-        if (bodyText.includes('```json')) parseCommands(bodyText);
-        if (bodyText.includes('[WAITING]')) {
-             if (Math.abs(bodyText.length - lastBodyLen) > 50) { 
-                chrome.runtime.sendMessage({ action: "AGENT_READY" });
-                lastBodyLen = bodyText.length; 
-                setStatus("AGENT: WAITING", "blue");
+        if (debounceTimer) clearTimeout(debounceTimer);
+        debounceTimer = setTimeout(() => {
+            const bodyText = document.body.innerText;
+            if (bodyText.includes('```json')) parseCommands(bodyText);
+            if (bodyText.includes('[WAITING]')) {
+                 if (Math.abs(bodyText.length - lastBodyLen) > 50) {
+                    chrome.runtime.sendMessage({ action: "AGENT_READY" });
+                    lastBodyLen = bodyText.length;
+                    setStatus("AGENT: WAITING", "blue");
+                }
             }
-        }
+        }, 500);
     });
     observer.observe(document.body, { subtree: true, childList: true, characterData: true });
 }
