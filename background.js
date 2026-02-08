@@ -262,14 +262,19 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     }
 
     if (msg.action === "AGENT_COMMAND") {
-        state.targetTabIds.forEach(tId => {
-            chrome.tabs.sendMessage(tId, { action: "EXECUTE_COMMAND", command: msg.payload }).catch(async () => {
-                // If failed, remove from targets
-                const freshState = await getState();
-                const newTargets = freshState.targetTabIds.filter(id => id !== tId);
-                await updateState({ targetTabIds: newTargets });
-            });
-        });
+        const promises = state.targetTabIds.map(tId =>
+            chrome.tabs.sendMessage(tId, { action: "EXECUTE_COMMAND", command: msg.payload })
+                .then(() => ({ tId, status: 'success' }))
+                .catch(() => ({ tId, status: 'failed' }))
+        );
+        const results = await Promise.all(promises);
+        const failedIds = results.filter(r => r.status === 'failed').map(r => r.tId);
+
+        if (failedIds.length > 0) {
+            const freshState = await getState();
+            const newTargets = freshState.targetTabIds.filter(id => !failedIds.includes(id));
+            await updateState({ targetTabIds: newTargets });
+        }
     }
 
     if (msg.action === "DISENGAGE_ALL") {
