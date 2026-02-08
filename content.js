@@ -146,8 +146,23 @@ function initAgent() {
 function triggerInterception(text, inputEl) {
     if (inputEl) {
         inputEl.style.outline = "3px solid #00ff00"; // NEON GREEN
-        inputEl.value = ""; 
+
+        // Improved React/Vue handling
+        try {
+            const descriptor = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(inputEl), 'value');
+            if (descriptor && descriptor.set) {
+                 descriptor.set.call(inputEl, "");
+            } else {
+                 inputEl.value = "";
+            }
+        } catch(e) {
+             inputEl.value = "";
+        }
+
         if(inputEl.innerText) inputEl.innerText = "";
+
+        inputEl.dispatchEvent(new InputEvent('input', { bubbles: true }));
+        inputEl.dispatchEvent(new Event('change', { bubbles: true }));
     }
     setStatus("INTERCEPTED", "neon");
     chrome.runtime.sendMessage({ action: "QUEUE_INPUT", source: "USER", payload: text });
@@ -177,16 +192,20 @@ function injectAgentPrompt(text) {
 }
 
 function observeAgentOutput() {
+    let debounceTimer = null;
     const observer = new MutationObserver(() => {
-        const bodyText = document.body.innerText;
-        if (bodyText.includes('```json')) parseCommands(bodyText);
-        if (bodyText.includes('[WAITING]')) {
-             if (Math.abs(bodyText.length - lastBodyLen) > 50) { 
-                chrome.runtime.sendMessage({ action: "AGENT_READY" });
-                lastBodyLen = bodyText.length; 
-                setStatus("AGENT: WAITING", "blue");
+        if (debounceTimer) clearTimeout(debounceTimer);
+        debounceTimer = setTimeout(() => {
+            const bodyText = document.body.innerText;
+            if (bodyText.includes('```json')) parseCommands(bodyText);
+            if (bodyText.includes('[WAITING]')) {
+                 if (Math.abs(bodyText.length - lastBodyLen) > 50) {
+                    chrome.runtime.sendMessage({ action: "AGENT_READY" });
+                    lastBodyLen = bodyText.length;
+                    setStatus("AGENT: WAITING", "blue");
+                }
             }
-        }
+        }, 500);
     });
     observer.observe(document.body, { subtree: true, childList: true, characterData: true });
 }
