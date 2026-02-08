@@ -8,7 +8,6 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     const store = await chrome.storage.session.get(['agentTabId', 'targetTabIds', 'lastTargetPayload', 'lastTargetSourceId']);
     const targetTabIds = new Set(store.targetTabIds || []);
 
-    // Synchronous Target Fetch for Content Script Trap
     if (message.action === "GET_LATEST_TARGET") {
         sendResponse(store.lastTargetPayload);
         return;
