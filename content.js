@@ -3,7 +3,7 @@ let myTabId = null;
 let lastCommandSignature = "";
 let inputGuardActive = false;
 
-// --- REAL-TIME CACHE ---
+// --- REAL-TIME STATE ---
 let draftText = "";
 let activeInput = null;
 
@@ -30,7 +30,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       break;
     case "REMOTE_INJECT":
       if (role === "AGENT") {
-          console.log("[System] Received Remote Command");
+          showToast("⚠️ REMOTE COMMAND RECEIVED", "#e0e0e0");
           handleRemoteCommand(msg.payload);
       }
       break;
@@ -40,26 +40,64 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   }
 });
 
+// --- UI: TOAST NOTIFICATIONS ---
+let toastEl = null;
+function showToast(text, bgColor = "#252525", pulse = false) {
+    if (!toastEl) {
+        toastEl = document.createElement('div');
+        toastEl.style.cssText = `
+            position: fixed; bottom: 30px; left: 50%; transform: translateX(-50%);
+            padding: 12px 24px; color: #fff; font-family: sans-serif; font-size: 14px; font-weight: bold;
+            border-radius: 8px; box-shadow: 0 10px 30px rgba(0,0,0,0.5); z-index: 2147483647;
+            border: 1px solid rgba(255,255,255,0.1); transition: all 0.2s; pointer-events: none;
+        `;
+        document.body.appendChild(toastEl);
+    }
+    toastEl.innerText = text;
+    toastEl.style.background = bgColor;
+    
+    if (pulse) {
+        toastEl.style.animation = "aa-pulse 1.5s infinite";
+        if (!document.getElementById('aa-styles')) {
+            const style = document.createElement('style');
+            style.id = 'aa-styles';
+            style.innerHTML = `@keyframes aa-pulse { 0% { box-shadow: 0 0 0 0 rgba(255,255,255, 0.4); } 70% { box-shadow: 0 0 0 10px rgba(255,255,255, 0); } 100% { box-shadow: 0 0 0 0 rgba(255,255,255, 0); } }`;
+            document.head.appendChild(style);
+        }
+    } else {
+        toastEl.style.animation = "none";
+    }
+}
+
 // --- AGENT LOGIC ---
 
 function initAgent() {
-  console.log("[System] Agent Armed. Monitor Active.");
-  showStatusBadge("AGENT ARMED: Type & CLICK SEND");
+  console.log("[System] Agent Armed.");
+  showToast("1. TYPE YOUR PROMPT...", "#2e3440");
   
   startInputMonitor();
   armAgentTrap();
   observeAgentOutput();
 }
 
-// 1. INPUT MONITOR (Passive)
+// 1. INPUT MONITOR
 function startInputMonitor() {
+    const updateState = (target) => {
+        activeInput = target;
+        draftText = target.value || target.innerText || "";
+        
+        if (draftText.length > 0) {
+            showToast("2. CLICK 'SEND' BUTTON (Do not use Enter)", "#bf616a", true);
+        } else {
+            showToast("1. TYPE YOUR PROMPT...", "#2e3440");
+        }
+    };
+
     window.addEventListener('input', (e) => {
         if (!e.isTrusted) return;
-
         const target = e.target;
         if (target.matches && target.matches('input, textarea, [contenteditable="true"], [role="textbox"]')) {
-            activeInput = target;
-            draftText = target.value || target.innerText || "";
+            updateState(target);
         }
     }, true);
     
@@ -71,37 +109,25 @@ function startInputMonitor() {
     }, true);
 }
 
-// 2. THE TRAP (Aggressive)
+// 2. THE TRAP
 function armAgentTrap() {
-    // We intercept Keydown to BLOCK Enter
     window.addEventListener('keydown', handleKeyBlockade, true);
-    // We intercept Mousedown to TRAP Clicks
     window.addEventListener('mousedown', handleMouseTrap, true);
 }
 
 function handleKeyBlockade(e) {
     if (!e.isTrusted) return;
-
+    
     if (e.key === 'Enter') {
         let target = e.target;
         if (target.nodeType === 3) target = target.parentElement;
         
+        // Only block if we are actually in a text box
         if (target && target.matches && target.matches('input, textarea, [contenteditable="true"], [role="textbox"]')) {
-            // STOP EVERYTHING
-            console.log("[System] Enter Key Blocked. Waiting for Click.");
+            console.log("[System] Enter Blocked");
             e.preventDefault();
             e.stopPropagation();
-            e.stopImmediatePropagation();
-            
-            // Visual Warning
-            showStatusBadge("⚠️ DO NOT USE ENTER! CLICK THE 'SEND' BUTTON.");
-            
-            // Flash the badge red
-            const badge = document.getElementById('aa-status-badge');
-            if (badge) {
-                badge.style.backgroundColor = "#bf616a";
-                setTimeout(() => badge.style.backgroundColor = "#252525", 1000);
-            }
+            showToast("⛔ ENTER DISABLED. PLEASE CLICK 'SEND'.", "#bf616a", true);
         }
     }
 }
@@ -109,52 +135,44 @@ function handleKeyBlockade(e) {
 function handleMouseTrap(e) {
     if (!e.isTrusted) return;
 
-    let target = e.target;
-    if (target.nodeType === 3) target = target.parentElement;
-    if (!target || typeof target.closest !== 'function') return;
-
-    // Check for button-like elements
-    const btn = target.closest('button, [role="button"], input[type="submit"], [data-testid*="send"], svg');
+    // Use composedPath to pierce Shadow DOM (e.g. clicking SVG inside button)
+    const path = e.composedPath();
+    
+    // Find the first button-like ancestor
+    const btn = path.find(el => {
+        return el.tagName && (
+            el.matches('button, [role="button"], input[type="submit"]') ||
+            el.getAttribute('data-testid')?.includes('send') ||
+            el.getAttribute('aria-label')?.includes('send')
+        );
+    });
     
     if (btn) {
-        // Do we have a draft?
+        // Check if we have a draft
         if (activeInput && (activeInput.value || activeInput.innerText)) {
-            console.log("[System] Trap Triggered by MOUSEDOWN on", btn);
+            console.log("[System] TRAPPED CLICK on:", btn);
             
+            // STOP THE CLICK
             e.preventDefault();
             e.stopPropagation();
             e.stopImmediatePropagation();
             
-            // Sync final state
+            // Capture State
             draftText = activeInput.value || activeInput.innerText || "";
             
+            // Execute
+            showToast("🔒 CAPTURED. INJECTING...", "#a3be8c");
             executeInjectionSequence(activeInput, btn, draftText);
         }
     }
 }
 
-// 2. THE SIDECAR (Popup Interaction)
-function handleRemoteCommand(text) {
-    let input = activeInput;
-    if (!input || !input.isConnected) {
-        input = Heuristics.findBestInput();
-    }
-    
-    if (input) {
-        executeInjectionSequence(input, null, text);
-    } else {
-        console.error("AgentAnything: Could not find input box for remote command.");
-        showStatusBadge("ERROR: Chat Input Not Found");
-    }
-}
-
-// 3. THE EXECUTION ENGINE
+// 3. EXECUTION ENGINE
 async function executeInjectionSequence(inputElement, buttonElement, userText) {
-    // A. LOCK DOWN
+    // A. PREP
     window.removeEventListener('keydown', handleKeyBlockade, true);
     window.removeEventListener('mousedown', handleMouseTrap, true);
     enableInputGuard(); 
-    showStatusBadge("PREPARING PAYLOAD...");
 
     // B. FETCH CONTEXT
     const response = await chrome.runtime.sendMessage({ action: "GET_LATEST_TARGET" });
@@ -162,7 +180,7 @@ async function executeInjectionSequence(inputElement, buttonElement, userText) {
     const storage = await chrome.storage.sync.get({ universalContext: '' });
     const universal = storage.universalContext ? `\n\n[CONTEXT]:\n${storage.universalContext}` : "";
 
-    // C. BUILD PAYLOAD
+    // C. PAYLOAD
     const finalPayload = `
 [SYSTEM: AGENT ROLE ACTIVE]
 [PROTOCOL: JSON OUTPUT ONLY]
@@ -192,37 +210,45 @@ ${userText}
     await visualType(inputElement, finalPayload);
 
     // E. NUCLEAR SUBMIT
-    showStatusBadge("SENDING...");
+    showToast("🚀 LAUNCHING AGENT...", "#88c0d0");
     
     setTimeout(() => {
         let sent = false;
 
-        // Attempt 1: Trigger the trapped button
+        // 1. Trapped Button
         if (buttonElement && buttonElement.isConnected) {
-            console.log("[System] Clicking Trapped Button");
             triggerNuclearClick(buttonElement);
             sent = true;
         }
 
-        // Attempt 2: Fallback to Heuristic Button
+        // 2. Heuristic Button
         if (!sent) {
             const freshBtn = Heuristics.findSendButton();
             if (freshBtn) {
-                console.log("[System] Clicking Heuristic Button");
                 triggerNuclearClick(freshBtn);
                 sent = true;
             }
         }
 
-        // Attempt 3: Enter Key (Only used if no button found/worked)
+        // 3. Enter Key Fallback
         if (!sent) {
-            console.log("[System] Fallback: Enter Key");
             const keyConfig = { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true, cancelable: true };
             inputElement.dispatchEvent(new KeyboardEvent('keydown', keyConfig));
             inputElement.dispatchEvent(new KeyboardEvent('keyup', keyConfig));
-            if (inputElement.form) inputElement.form.requestSubmit ? inputElement.form.requestSubmit() : inputElement.form.submit();
         }
     }, 500);
+}
+
+// --- SIDECAR (Popup) ---
+function handleRemoteCommand(text) {
+    let input = activeInput;
+    if (!input || !input.isConnected) input = Heuristics.findBestInput();
+    
+    if (input) {
+        executeInjectionSequence(input, null, text);
+    } else {
+        showToast("❌ ERROR: CANNOT FIND INPUT", "#bf616a");
+    }
 }
 
 // --- UTILITIES ---
@@ -260,36 +286,13 @@ async function visualType(input, text) {
 function enableInputGuard() {
     if (inputGuardActive) return;
     inputGuardActive = true;
-    
-    const blockEvent = (e) => {
-        if (!e.isTrusted) return; 
-        e.stopPropagation();
-        e.preventDefault();
-    };
-    
+    const blockEvent = (e) => { if (!e.isTrusted) return; e.stopPropagation(); e.preventDefault(); };
     ['click', 'mousedown', 'mouseup', 'keydown', 'keyup', 'keypress', 'focus'].forEach(evt => {
         window.addEventListener(evt, blockEvent, true); 
     });
 }
 
-function showStatusBadge(text) {
-    let badge = document.getElementById('aa-status-badge');
-    if (!badge) {
-        badge = document.createElement('div');
-        badge.id = 'aa-status-badge';
-        badge.style.cssText = `
-            position: fixed; bottom: 20px; left: 20px; 
-            background: #252525; color: #fff; padding: 10px 15px; 
-            border: 1px solid #444; border-radius: 5px;
-            font-family: sans-serif; font-size: 12px; z-index: 999999;
-            box-shadow: 0 5px 15px rgba(0,0,0,0.5); display: flex; align-items: center; gap: 10px; transition: background-color 0.3s;
-        `;
-        document.body.appendChild(badge);
-    }
-    badge.innerText = text;
-}
-
-// --- OUTPUT PARSER ---
+// --- OUTPUT PARSING ---
 function observeAgentOutput() {
   const observer = new MutationObserver((mutations) => {
     const bodyText = document.body.innerText;
@@ -324,13 +327,13 @@ function dispatchIfNew(json) {
       action: "AGENT_COMMAND", 
       payload: { ...json, targetTabId: window.activeTargetId } 
     });
-    showStatusBadge(`EXEC: ${json.action}`);
+    showToast(`⚙️ EXEC: ${json.action}`, "#4c566a");
   }
 }
 
 // --- TARGET LOGIC ---
 function initTarget() {
-  showStatusBadge("TARGET ACTIVE");
+  showToast("🎯 TARGET LINKED", "#a3be8c");
   setTimeout(() => {
       const map = Heuristics.generateMap();
       const content = Heuristics.findMainContent().innerText.substring(0, 5000);
