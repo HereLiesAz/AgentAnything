@@ -1,9 +1,10 @@
-console.log("%c [AgentAnything] GENESIS PROTOCOL READY ", "background: #000; color: #ff00ff; font-size: 16px; font-weight: bold;");
+console.log("%c [AgentAnything] TRAP RESTORED ", "background: #000; color: #00ff00; font-size: 16px; font-weight: bold;");
 
 // --- STATE ---
 let role = null;
 let lastBodyLen = 0;
 let bootInterval = null;
+let activeInput = null; // Track the input we are guarding
 
 // --- BOOTSTRAPPER ---
 function boot() {
@@ -20,6 +21,7 @@ bootInterval = setInterval(boot, 100);
 // --- UI ENGINE ---
 let shadowHost = null;
 let shadowRoot = null;
+let panelEl = null;
 
 function ensureUI() {
     if (shadowHost && shadowHost.isConnected) return;
@@ -43,13 +45,13 @@ function ensureUI() {
         .aa-dot.green { background: #a3be8c; box-shadow: 0 0 5px #a3be8c; }
         .aa-dot.purple { background: #b48ead; box-shadow: 0 0 5px #b48ead; }
         .aa-dot.red { background: #bf616a; box-shadow: 0 0 5px #bf616a; }
-        .aa-dot.yellow { background: #ebcb8b; box-shadow: 0 0 5px #ebcb8b; }
+        .aa-dot.neon { background: #0f0; box-shadow: 0 0 8px #0f0; }
     `;
     shadowRoot.appendChild(style);
-    const panel = document.createElement('div');
-    panel.className = 'aa-panel';
-    panel.innerHTML = `<div class="aa-dot" id="dot"></div><span id="txt">STANDBY...</span>`;
-    shadowRoot.appendChild(panel);
+    panelEl = document.createElement('div');
+    panelEl.className = 'aa-panel';
+    panelEl.innerHTML = `<div class="aa-dot" id="dot"></div><span id="txt">STANDBY...</span>`;
+    shadowRoot.appendChild(panelEl);
 }
 
 function setStatus(text, color) {
@@ -97,27 +99,65 @@ function initAgent() {
     setStatus("AGENT: READY", "blue");
     const Heuristics = window.AA_Heuristics;
 
+    // 1. INPUT TRACKING (To know what to grab)
+    window.addEventListener('focus', (e) => {
+        if (['INPUT','TEXTAREA'].includes(e.target.tagName) || e.target.isContentEditable) {
+            activeInput = e.target;
+        }
+    }, true);
+    
+    // 2. KEYDOWN TRAP (Enter)
     window.addEventListener('keydown', (e) => {
         if (e.key === 'Enter' && !e.shiftKey) {
             const el = e.target;
             if (['INPUT','TEXTAREA'].includes(el.tagName) || el.isContentEditable) {
                 const val = el.value || el.innerText;
                 if (val && val.trim().length > 0) {
+                    // STOP EVERYTHING
                     e.preventDefault();
+                    e.stopPropagation();
                     e.stopImmediatePropagation();
                     
-                    // INTERCEPTION
-                    chrome.runtime.sendMessage({ action: "QUEUE_INPUT", source: "USER", payload: val });
-                    
-                    if(el.value) el.value = "";
-                    if(el.innerText) el.innerText = "";
-                    
-                    setStatus("GENESIS: SEQUENCE STARTED", "yellow");
+                    triggerInterception(val, el);
                 }
             }
         }
     }, true);
+
+    // 3. CLICK TRAP (Submit Buttons)
+    window.addEventListener('click', (e) => {
+        // Is it a button?
+        const el = e.target.closest('button, [role="button"], input[type="submit"]');
+        if (el) {
+            // Do we have text?
+            const input = activeInput || Heuristics.findBestInput();
+            const val = input ? (input.value || input.innerText) : "";
+            
+            if (val && val.trim().length > 0) {
+                // STOP EVERYTHING
+                e.preventDefault();
+                e.stopPropagation();
+                e.stopImmediatePropagation();
+                
+                triggerInterception(val, input);
+            }
+        }
+    }, true); // CAPTURE PHASE IS CRITICAL
+
     observeAgentOutput();
+}
+
+function triggerInterception(text, inputEl) {
+    // 1. Visual Feedback
+    if (inputEl) {
+        inputEl.style.outline = "3px solid #00ff00"; // BRIGHT GREEN BORDER
+        inputEl.value = ""; // Clear it
+        if(inputEl.innerText) inputEl.innerText = "";
+    }
+    setStatus("INTERCEPTED", "neon");
+
+    // 2. Send to Queue
+    chrome.runtime.sendMessage({ action: "QUEUE_INPUT", source: "USER", payload: text });
 }
 
 function injectAgentPrompt(text) {
@@ -148,10 +188,8 @@ function observeAgentOutput() {
     const observer = new MutationObserver(() => {
         const bodyText = document.body.innerText;
         
-        // Execute Commands
         if (bodyText.includes('```json')) parseCommands(bodyText);
         
-        // Detect Wait Token
         if (bodyText.includes('[WAITING]')) {
              if (Math.abs(bodyText.length - lastBodyLen) > 50) { 
                 chrome.runtime.sendMessage({ action: "AGENT_READY" });
