@@ -213,6 +213,13 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
         chrome.tabs.sendMessage(targetId, { action: "INIT_TARGET" });
       }
+
+      // Check if both roles are assigned to trigger GENESIS MODE
+      const freshState = await getState();
+      if (freshState.agentTabId && freshState.targetTabIds.length > 0) {
+          console.log("[System] Both roles assigned. Triggering GENESIS MODE.");
+          chrome.tabs.sendMessage(freshState.agentTabId, { action: "GENESIS_MODE_ACTIVE" });
+      }
     }
 
     if (msg.action === "AGENT_READY") {

@@ -79,6 +79,9 @@ function startMessaging() {
                 role = "AGENT";
                 initAgent();
                 break;
+            case "GENESIS_MODE_ACTIVE":
+                if (role === "AGENT") activateGenesisMode();
+                break;
             case "INIT_TARGET":
                 role = "TARGET";
                 initTarget();
@@ -96,8 +99,32 @@ function startMessaging() {
     });
 }
 
+function activateGenesisMode() {
+    isWaitingForGenesisInput = true;
+    setStatus("GENESIS MODE: TYPE & CLICK SUBMIT", "neon");
+
+    // Highlight best input immediately
+    const Heuristics = window.AA_Heuristics;
+    const input = Heuristics.findBestInput();
+    if (input) {
+        input.style.outline = "3px solid #00ff00";
+        input.placeholder = "TYPE COMMAND HERE & CLICK SEND BUTTON...";
+        input.focus();
+        activeInput = input;
+    }
+
+    // Disable Enter Key during Genesis to force click
+    window.addEventListener('keydown', (e) => {
+        if (isWaitingForGenesisInput && e.key === 'Enter') {
+            e.preventDefault();
+            e.stopPropagation();
+            setStatus("USE MOUSE TO CLICK SEND", "red");
+        }
+    }, true);
+}
+
 function initAgent() {
-    setStatus("AGENT: READY - WAITING FOR PROMPT", "blue");
+    setStatus("AGENT: ASSIGNED", "blue");
     const Heuristics = window.AA_Heuristics;
 
     // Highlight inputs immediately
@@ -122,21 +149,8 @@ function initAgent() {
     window.addEventListener('focus', (e) => {
         if (['INPUT','TEXTAREA'].includes(e.target.tagName) || e.target.isContentEditable) {
             activeInput = e.target;
+            // Maintain highlight if in genesis mode
             if (isWaitingForGenesisInput) e.target.style.outline = "3px solid #00ff00";
-        }
-    }, true);
-    
-    // ENTER KEY TRAP
-    window.addEventListener('keydown', (e) => {
-        if (e.key === 'Enter' && !e.shiftKey) {
-            const el = e.target;
-            if (['INPUT','TEXTAREA'].includes(el.tagName) || el.isContentEditable) {
-                const val = el.value || el.innerText;
-                if (val && val.trim().length > 0) {
-                    e.preventDefault(); e.stopPropagation(); e.stopImmediatePropagation();
-                    triggerInterception(val, el);
-                }
-            }
         }
     }, true);
 
