@@ -38,7 +38,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 });
 
 // --- UI: EVENT-BASED INPUT GUARD ---
-// Blocks interaction but allows scrolling.
+// Blocks USER interaction, allows SCRIPT interaction.
 function enableInputGuard() {
     if (inputGuardActive) return;
     inputGuardActive = true;
@@ -47,21 +47,23 @@ function enableInputGuard() {
         // ALLOW: Events inside our own Interface Panel
         if (e.target.closest('#aa-interface')) return;
 
-        // BLOCK: Everything else interacting with the page content
+        // ALLOW: Programmatic events (Agent Actions)
+        if (!e.isTrusted) return;
+
+        // BLOCK: Real user interactions with the page
         e.stopPropagation();
         e.preventDefault();
     };
     
-    // We capture these events at the Window level before they reach elements
+    // Capture events early
     const captureEvents = ['click', 'mousedown', 'mouseup', 'keydown', 'keyup', 'keypress', 'focus', 'submit'];
     
     captureEvents.forEach(evt => {
-        window.addEventListener(evt, blockEvent, true); // true = capture phase
+        window.addEventListener(evt, blockEvent, true); 
     });
 
-    // Visual Indicator that input is locked
     const badge = document.createElement('div');
-    badge.innerText = "🔒 AGENT CONTROL";
+    badge.innerText = "🔒 AGENT ACTIVE";
     badge.style.cssText = `
         position: fixed; top: 10px; right: 10px; 
         background: #2e3440; color: #88c0d0; padding: 4px 8px; 
@@ -70,7 +72,7 @@ function enableInputGuard() {
     `;
     document.body.appendChild(badge);
     
-    console.log("[System] Input Guard Active. Scroll allowed, Interaction blocked.");
+    console.log("[System] Input Guard Active. User interaction blocked.");
 }
 
 // --- AGENT INTERFACE ---
@@ -110,11 +112,10 @@ ${universal}
     `;
     
     if (!window.hasInitialized) {
-        // We delay the guard until we actually start working
         queueMessage(systemPrompt);
         window.hasInitialized = true;
         
-        // Activate Guard after a short delay to ensure setup is done
+        // Activate Guard after delay
         setTimeout(enableInputGuard, 2000);
     }
     
@@ -179,7 +180,6 @@ function createInterface(enableInput) {
 
       input.onkeydown = (e) => { 
           if (e.key === 'Enter') handleSend(); 
-          // Stop propagation so hitting Enter doesn't trigger anything on the page
           e.stopPropagation();
       };
       
@@ -254,7 +254,7 @@ function dispatchIfNew(json) {
   }
 }
 
-// --- QUEUE & VISUAL INJECTION ---
+// --- QUEUE & INJECTION ---
 
 function injectUpdate(sourceId, payload) {
   window.activeTargetId = sourceId;
@@ -295,7 +295,6 @@ function processQueue() {
     });
 }
 
-// VISUAL TYPING ENGINE
 async function visualTypeAndSend(text, retries = 0, callback) {
     const input = Heuristics.findBestInput();
     
@@ -309,16 +308,12 @@ async function visualTypeAndSend(text, retries = 0, callback) {
     }
 
     try {
-        // 1. Visually Scroll to Input
         input.scrollIntoView({ behavior: "smooth", block: "center" });
         input.focus();
         
-        // 2. Ghost Typing Effect
         let currentVal = input.value || input.innerText || "";
-        // Ensure separation from previous text
         if (currentVal.length > 0 && !currentVal.endsWith('\n')) currentVal += "\n";
         
-        // React/Vue Setter Helper
         let nativeSetter;
         if (input instanceof HTMLTextAreaElement) {
             nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, "value").set;
@@ -326,7 +321,6 @@ async function visualTypeAndSend(text, retries = 0, callback) {
             nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value").set;
         }
 
-        // Type character by character
         for (let i = 0; i < text.length; i++) {
             currentVal += text[i];
             
@@ -337,12 +331,9 @@ async function visualTypeAndSend(text, retries = 0, callback) {
             }
             
             input.dispatchEvent(new Event('input', { bubbles: true }));
-            
-            // Fast typing speed (10-20ms per char)
             await new Promise(r => setTimeout(r, 10)); 
         }
 
-        // Final event dispatch to ensure state commits
         ['beforeinput', 'input', 'change'].forEach(evt => {
             input.dispatchEvent(new Event(evt, { bubbles: true, cancelable: true }));
         });
@@ -351,7 +342,6 @@ async function visualTypeAndSend(text, retries = 0, callback) {
         console.error("Injection failed", e);
     }
 
-    // 3. Send
     setTimeout(() => {
         const sendBtn = Heuristics.findSendButton();
         if (sendBtn && !sendBtn.disabled) {
@@ -386,7 +376,7 @@ function updateLog(payload) {
 // --- TARGET LOGIC ---
 
 function initTarget() {
-  enableInputGuard(); // Block interaction on Target too
+  enableInputGuard(); 
 
   const indicator = document.createElement('div');
   indicator.innerText = "LINKED";
@@ -430,7 +420,9 @@ ${contentNode.innerText.substring(0, 5000)}
 // VISUAL ACTION EXECUTION
 function executeCommand(cmd) {
     if (cmd.tool === "interact") {
-        const el = document.querySelector(`[data-aa-id="${cmd.id}"]`);
+        // IMPORTANT: Use Heuristics to find element (Shadow DOM support)
+        const el = Heuristics.getElementByAAId(cmd.id);
+        
         if (el) {
             // 1. Scroll & Highlight
             el.scrollIntoView({ behavior: "smooth", block: "center" });
@@ -439,7 +431,7 @@ function executeCommand(cmd) {
             const originalOutline = el.style.outline;
             
             el.style.transition = "outline 0.2s";
-            el.style.outline = "3px solid #a3be8c"; // Action Green
+            el.style.outline = "3px solid #a3be8c"; 
             
             // 2. Wait 500ms for user to see
             setTimeout(() => {
@@ -459,6 +451,11 @@ function executeCommand(cmd) {
                   payload: { type: "APPEND", content: `OK: ${cmd.action} -> ${cmd.id}` }
                 });
             }, 600);
+        } else {
+             chrome.runtime.sendMessage({
+                  action: "TARGET_UPDATE",
+                  payload: { type: "APPEND", content: `ERROR: Element ${cmd.id} not found (DOM Changed?)` }
+            });
         }
     } else if (cmd.tool === "browser" && cmd.action === "find") {
         const found = window.find(cmd.value);
