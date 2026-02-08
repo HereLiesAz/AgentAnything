@@ -1,22 +1,64 @@
-let agentTab = null;
-let activeTargets = new Set();
+// STATE MANAGEMENT
+let agentTabId = null;
+let targetTabIds = new Set();
+// The Mailbox: Stores the last known state of the active target to feed new agents
+let lastTargetPayload = null;
+let lastTargetId = null;
 
+// --- EVENT LISTENERS ---
+
+// 1. THE HANDSHAKE (Auto-Reconnect)
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   const tabId = sender.tab ? sender.tab.id : null;
 
+  // A tab has loaded and is asking "Who am I?"
+  if (message.action === "HELLO" && tabId) {
+    if (tabId === agentTabId) {
+      console.log(`Restoring AGENT: ${tabId}`);
+      chrome.tabs.sendMessage(tabId, { action: "INIT_AGENT" });
+      // If we have a target waiting, deliver it immediately
+      if (lastTargetPayload && lastTargetId) {
+        setTimeout(() => {
+          chrome.tabs.sendMessage(tabId, {
+            action: "INJECT_OBSERVATION",
+            sourceId: lastTargetId,
+            payload: lastTargetPayload
+          });
+        }, 500);
+      }
+    } else if (targetTabIds.has(tabId)) {
+      console.log(`Restoring TARGET: ${tabId}`);
+      chrome.tabs.sendMessage(tabId, { action: "INIT_TARGET", tabId: tabId });
+    }
+    return;
+  }
+
+  // 2. ROLE ASSIGNMENT (User Clicked Button)
   if (message.action === "ASSIGN_ROLE") {
     if (message.role === "AGENT") {
-      agentTab = message.tabId;
-      console.log(`Agent assigned: ${agentTab}`);
+      agentTabId = message.tabId;
+      targetTabIds.delete(message.tabId); // Can't be both
+      console.log(`Agent assigned: ${agentTabId}`);
+      
+      // Immediate delivery of cached target
+      if (lastTargetPayload && lastTargetId) {
+        chrome.tabs.sendMessage(agentTabId, {
+          action: "INJECT_OBSERVATION",
+          sourceId: lastTargetId,
+          payload: lastTargetPayload
+        });
+      }
     } else {
-      activeTargets.add(message.tabId);
+      targetTabIds.add(message.tabId);
+      if (agentTabId === message.tabId) agentTabId = null;
       console.log(`Target acquired: ${message.tabId}`);
     }
     return;
   }
 
+  // 3. AGENT COMMANDS
   if (message.action === "AGENT_COMMAND") {
-    const targetId = message.payload.targetTabId || activeTargets.values().next().value;
+    const targetId = message.payload.targetTabId || lastTargetId;
     if (!targetId) return;
 
     if (message.payload.tool === "browser") {
@@ -29,17 +71,22 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     }
   }
 
+  // 4. TARGET UPDATES
   if (message.action === "TARGET_UPDATE") {
-    if (agentTab) {
-      chrome.tabs.sendMessage(agentTab, {
+    lastTargetPayload = message.payload;
+    lastTargetId = tabId;
+
+    if (agentTabId) {
+      chrome.tabs.sendMessage(agentTabId, {
         action: "INJECT_OBSERVATION",
         sourceId: tabId,
-        payload: message.payload // Note: updated to pass 'payload' object
+        payload: message.payload
       });
     }
   }
 });
 
+// --- BROWSER CONTROL ---
 function handleBrowserAction(tabId, cmd) {
   switch (cmd.action) {
     case "refresh":
@@ -63,7 +110,12 @@ function handleBrowserAction(tabId, cmd) {
   }
 }
 
+// --- CLEANUP ---
 chrome.tabs.onRemoved.addListener((tabId) => {
-  if (agentTab === tabId) agentTab = null;
-  activeTargets.delete(tabId);
+  if (agentTabId === tabId) agentTabId = null;
+  targetTabIds.delete(tabId);
+  if (lastTargetId === tabId) {
+      lastTargetId = null;
+      lastTargetPayload = null;
+  }
 });
