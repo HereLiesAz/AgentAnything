@@ -1,11 +1,15 @@
-// hereliesaz/agentanything/AgentAnything-05c5b6fc4348e667e2769e1a2345ae1bf3bde566/background.js
+// STATE MANAGEMENT
+// We now use chrome.storage.session to survive Service Worker termination.
+// No global variables are used for critical state.
 
 // --- 0. THE WAKE UP CALL (AUTO-INJECTION ON INSTALL) ---
 chrome.runtime.onInstalled.addListener(async () => {
   console.log("AgentAnything Installed. Waking up all tabs...");
+  
+  // Initialize Session Storage
   await chrome.storage.session.set({ 
       agentTabId: null, 
-      targetTabIds: [], // Storage API stores arrays, not Sets
+      targetTabIds: [], 
       lastTargetPayload: null, 
       lastTargetSourceId: null 
   });
@@ -14,10 +18,12 @@ chrome.runtime.onInstalled.addListener(async () => {
   
   for (const cs of manifest.content_scripts) {
     const tabs = await chrome.tabs.query({url: cs.matches});
+    
     for (const tab of tabs) {
       if (!tab.url || tab.url.startsWith("chrome://") || tab.url.startsWith("edge://") || tab.url.startsWith("about:") || tab.url.startsWith("view-source:")) {
         continue;
       }
+      
       try {
         await chrome.scripting.executeScript({
           target: {tabId: tab.id},
@@ -33,10 +39,11 @@ chrome.runtime.onInstalled.addListener(async () => {
 
 // --- 1. THE HANDSHAKE (Auto-Reconnect) ---
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-  // We must return true to indicate we will respond asynchronously (if needed),
-  // though we mostly use fire-and-forget messaging here.
+  // Async IIFE to handle storage calls
   (async () => {
     const tabId = sender.tab ? sender.tab.id : null;
+    
+    // Retrieve current state
     const store = await chrome.storage.session.get(['agentTabId', 'targetTabIds', 'lastTargetPayload', 'lastTargetSourceId']);
     const targetTabIds = new Set(store.targetTabIds || []);
 
@@ -45,7 +52,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       if (tabId === store.agentTabId) {
         console.log(`Restoring AGENT: ${tabId}`);
         chrome.tabs.sendMessage(tabId, { action: "INIT_AGENT" });
-        // Immediate delivery of cached target
+        // If we have a target waiting, deliver it immediately
         if (store.lastTargetPayload && store.lastTargetSourceId) {
           setTimeout(() => {
             chrome.tabs.sendMessage(tabId, {
@@ -71,6 +78,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         
         console.log(`Agent assigned: ${message.tabId}`);
         
+        // Immediate delivery of cached target
         if (store.lastTargetPayload && store.lastTargetSourceId) {
           chrome.tabs.sendMessage(message.tabId, {
             action: "INJECT_OBSERVATION",
@@ -84,7 +92,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         
         // If this tab was the agent, clear it
         if (store.agentTabId === message.tabId) {
-             await chrome.storage.session.set({ agentTabId: null });
+            await chrome.storage.session.set({ agentTabId: null });
         }
         console.log(`Target acquired: ${message.tabId}`);
       }
@@ -109,12 +117,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     // --- 4. TARGET UPDATES (With Deduplication) ---
     if (message.action === "TARGET_UPDATE") {
       // Deduplication: If payload is identical to last stored, ignore.
-      // We use a simple JSON string comparison.
       const newPayloadStr = JSON.stringify(message.payload);
       const oldPayloadStr = JSON.stringify(store.lastTargetPayload);
 
       if (newPayloadStr === oldPayloadStr) {
-          // console.log("Skipping duplicate payload from target.");
           return; 
       }
 
@@ -132,7 +138,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       }
     }
   })();
-  return true; // Keep channel open for async
+  
+  return true; // Keep message channel open for async response
 });
 
 // --- BROWSER CONTROL ---
