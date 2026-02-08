@@ -1,6 +1,7 @@
 let role = null;
 let myTabId = null;
 let targetMap = [];
+let agentMap = []; // NEW: Agent maps itself
 let lastCommandSignature = "";
 let knownDomainContexts = new Set(); 
 let uiPanel = null;
@@ -34,35 +35,39 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     case "INJECT_UPDATE":
       if (role === "AGENT") injectUpdate(msg.sourceId, msg.payload);
       break;
+    case "DISENGAGE_LOCAL":
+      disengageLocal();
+      break;
   }
 });
 
+function disengageLocal() {
+    if (uiPanel) uiPanel.remove();
+    const guard = document.getElementById('aa-input-lock');
+    if (guard) guard.remove();
+    const badge = document.getElementById('aa-badge');
+    if (badge) badge.remove();
+    window.location.reload();
+}
+
 // --- UI: EVENT-BASED INPUT GUARD ---
-// Blocks USER interaction, allows SCRIPT interaction.
 function enableInputGuard() {
     if (inputGuardActive) return;
     inputGuardActive = true;
     
     const blockEvent = (e) => {
-        // ALLOW: Events inside our own Interface Panel
         if (e.target.closest('#aa-interface')) return;
-
-        // ALLOW: Programmatic events (Agent Actions)
-        if (!e.isTrusted) return;
-
-        // BLOCK: Real user interactions with the page
+        if (!e.isTrusted) return; // Allow scripts
         e.stopPropagation();
         e.preventDefault();
     };
     
-    // Capture events early
-    const captureEvents = ['click', 'mousedown', 'mouseup', 'keydown', 'keyup', 'keypress', 'focus', 'submit'];
-    
-    captureEvents.forEach(evt => {
+    ['click', 'mousedown', 'mouseup', 'keydown', 'keyup', 'keypress', 'focus', 'submit'].forEach(evt => {
         window.addEventListener(evt, blockEvent, true); 
     });
 
     const badge = document.createElement('div');
+    badge.id = 'aa-badge';
     badge.innerText = "🔒 AGENT ACTIVE";
     badge.style.cssText = `
         position: fixed; top: 10px; right: 10px; 
@@ -71,13 +76,17 @@ function enableInputGuard() {
         font-family: monospace; font-size: 10px; pointer-events: none; z-index: 2147483647;
     `;
     document.body.appendChild(badge);
-    
-    console.log("[System] Input Guard Active. User interaction blocked.");
 }
 
 // --- AGENT INTERFACE ---
 
 function initAgent() {
+  // 1. Self-Map to find our own controls
+  setTimeout(() => {
+      agentMap = Heuristics.generateMap();
+      console.log("[System] Agent Self-Map Complete:", agentMap);
+  }, 1000);
+
   createInterface(true); 
 
   chrome.storage.sync.get({ universalContext: '' }, (items) => {
@@ -114,8 +123,6 @@ ${universal}
     if (!window.hasInitialized) {
         queueMessage(systemPrompt);
         window.hasInitialized = true;
-        
-        // Activate Guard after delay
         setTimeout(enableInputGuard, 2000);
     }
     
@@ -137,6 +144,25 @@ function createInterface(enableInput) {
     font-size: 13px; box-shadow: 0 4px 12px rgba(0,0,0,0.3);
     max-height: 50vh; overflow: hidden;
   `;
+
+  // Header with Disengage
+  const header = document.createElement('div');
+  header.style.cssText = "padding: 5px 10px; background: #252525; border-bottom: 1px solid #444; display: flex; justify-content: space-between; align-items: center;";
+  
+  const title = document.createElement('span');
+  title.innerText = role === "AGENT" ? "AGENT CONTROL" : "TARGET MONITOR";
+  title.style.fontWeight = "bold";
+  
+  const disengageBtn = document.createElement('button');
+  disengageBtn.innerText = "DISENGAGE";
+  disengageBtn.style.cssText = "background: #bf616a; color: white; border: none; border-radius: 3px; cursor: pointer; font-size: 10px; padding: 2px 6px;";
+  disengageBtn.onclick = () => {
+      chrome.runtime.sendMessage({ action: "DISENGAGE_ALL" });
+  };
+  
+  header.appendChild(title);
+  header.appendChild(disengageBtn);
+  uiPanel.appendChild(header);
 
   // Log Area
   const logArea = document.createElement('div');
@@ -161,9 +187,6 @@ function createInterface(enableInput) {
         font-family: inherit; outline: none;
       `;
       
-      input.onfocus = () => input.style.borderColor = "#666";
-      input.onblur = () => input.style.borderColor = "#444";
-      
       const handleSend = () => {
           const val = input.value.trim();
           if (val) {
@@ -172,7 +195,6 @@ function createInterface(enableInput) {
               userMsg.innerText = `> ${val}`;
               logArea.appendChild(userMsg);
               logArea.scrollTop = logArea.scrollHeight;
-              
               queueMessage(val);
               input.value = "";
           }
@@ -185,8 +207,6 @@ function createInterface(enableInput) {
       
       inputContainer.appendChild(input);
       uiPanel.appendChild(inputContainer);
-      
-      setTimeout(() => input.focus(), 500);
   }
 
   document.body.appendChild(uiPanel);
@@ -224,25 +244,17 @@ function parseCommands(text) {
 }
 
 function sanitizeJson(str) {
-  return str
-    .replace(/\/\/.*$/gm, '') 
-    .replace(/\/\*[\s\S]*?\*\//g, '') 
-    .replace(/'/g, '"') 
-    .replace(/([{,]\s*)([a-zA-Z0-9_]+?)\s*:/g, '$1"$2":')
-    .replace(/,\s*}/g, '}')
-    .replace(/,\s*]/g, ']');
+  return str.replace(/\/\/.*$/gm, '').replace(/\/\*[\s\S]*?\*\//g, '').replace(/'/g, '"').replace(/([{,]\s*)([a-zA-Z0-9_]+?)\s*:/g, '$1"$2":').replace(/,\s*}/g, '}').replace(/,\s*]/g, ']');
 }
 
 function dispatchIfNew(json) {
   const sig = JSON.stringify(json);
   if (sig !== lastCommandSignature) {
     lastCommandSignature = sig;
-    
     chrome.runtime.sendMessage({ 
       action: "AGENT_COMMAND", 
       payload: { ...json, targetTabId: window.activeTargetId } 
     });
-    
     const logArea = document.getElementById('aa-log-area');
     if (logArea) {
         const line = document.createElement('div');
@@ -260,22 +272,13 @@ function injectUpdate(sourceId, payload) {
   window.activeTargetId = sourceId;
   createInterface(true);
   
-  updateLog(payload);
-
-  let aiMessage = "";
   if (payload.type === "APPEND") {
-    aiMessage = `\n[UPDATE]:\n${payload.content}`;
+      updateLog(payload.content, "APPEND");
+      queueMessage(`\n[UPDATE]:\n${payload.content}`);
   } else {
-    if (payload.url) {
-        try {
-            const hostname = new URL(payload.url).hostname.replace(/^www\./, '');
-            if (!knownDomainContexts.has(hostname)) knownDomainContexts.add(hostname);
-        } catch(e) {}
-    }
-    aiMessage = `\n[CONNECTED]:\n${payload.content}`;
+      updateLog(`Connected: ${payload.url}`, "INFO");
+      queueMessage(`\n[CONNECTED]:\n${payload.content}`);
   }
-
-  queueMessage(aiMessage);
 }
 
 function queueMessage(text) {
@@ -285,22 +288,24 @@ function queueMessage(text) {
 
 function processQueue() {
     if (isProcessingQueue || messageQueue.length === 0) return;
-
     isProcessingQueue = true;
     const text = messageQueue.shift();
-
     visualTypeAndSend(text, 0, () => {
         isProcessingQueue = false;
-        setTimeout(processQueue, 1000); 
+        setTimeout(processQueue, 1500); 
     });
 }
 
-// VISUAL TYPING ENGINE
+// --- AUTOMATION ENGINE ---
+
 async function visualTypeAndSend(text, retries = 0, callback) {
+    // Refresh self-map to ensure we have latest IDs
+    agentMap = Heuristics.generateMap();
+    
     const input = Heuristics.findBestInput();
     
     if (!input) {
-        if (retries < 5) {
+        if (retries < 3) {
             setTimeout(() => visualTypeAndSend(text, retries + 1, callback), 1000);
             return;
         }
@@ -312,9 +317,6 @@ async function visualTypeAndSend(text, retries = 0, callback) {
         input.scrollIntoView({ behavior: "smooth", block: "center" });
         input.focus();
         
-        let currentVal = input.value || input.innerText || "";
-        if (currentVal.length > 0 && !currentVal.endsWith('\n')) currentVal += "\n";
-        
         let nativeSetter;
         if (input instanceof HTMLTextAreaElement) {
             nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, "value").set;
@@ -322,151 +324,126 @@ async function visualTypeAndSend(text, retries = 0, callback) {
             nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value").set;
         }
 
-        for (let i = 0; i < text.length; i++) {
-            currentVal += text[i];
-            
-            if (nativeSetter) {
-                nativeSetter.call(input, currentVal);
-            } else {
-                input.innerText = currentVal;
-            }
-            
-            input.dispatchEvent(new Event('input', { bubbles: true }));
-            await new Promise(r => setTimeout(r, 10)); 
+        let currentVal = input.value || "";
+        if (currentVal && !currentVal.endsWith('\n')) currentVal += "\n";
+        
+        if (nativeSetter) {
+             nativeSetter.call(input, currentVal + text);
+        } else {
+             input.innerText = currentVal + text;
         }
+        input.dispatchEvent(new Event('input', { bubbles: true }));
 
-        // Final State Commitment
-        ['beforeinput', 'input', 'change'].forEach(evt => {
-            input.dispatchEvent(new Event(evt, { bubbles: true, cancelable: true }));
-        });
+        // Trigger Submit Logic
+        setTimeout(() => triggerHardSubmit(input), 300);
         
     } catch (e) {
         console.error("Injection failed", e);
     }
 
-    // THE NUCLEAR SUBMIT SEQUENCE
-    setTimeout(() => {
-        const sendBtn = Heuristics.findSendButton();
-        
-        // 1. Try Clicking Button
-        if (sendBtn && !sendBtn.disabled) {
-            sendBtn.click();
-            // Trigger specific React/Framework listeners that might rely on mouse events
-            sendBtn.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true, view: window }));
-            sendBtn.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true, view: window }));
-        }
-        
-        // 2. Try Hammering Enter (Always do this as backup)
-        const keyConfig = { bubbles: true, cancelable: true, keyCode: 13, key: 'Enter', code: 'Enter', which: 13 };
-        input.dispatchEvent(new KeyboardEvent('keydown', keyConfig));
-        input.dispatchEvent(new KeyboardEvent('keypress', keyConfig));
-        input.dispatchEvent(new KeyboardEvent('keyup', keyConfig));
-        
-        // 3. Try Native Form Submit
-        if (input.form) {
-             if (input.form.requestSubmit) {
-                 input.form.requestSubmit();
-             } else {
-                 input.form.submit();
-             }
-        }
-
-        if (callback) callback();
-    }, 500);
+    setTimeout(() => { if (callback) callback(); }, 1000);
 }
 
-function updateLog(payload) {
+function triggerHardSubmit(inputElement) {
+    // 1. Try finding specific "Send" button in our Self-Map
+    // Look for high-scoring buttons (score > 15 usually implies 'send' or 'submit')
+    const probableSend = agentMap.find(item => 
+        (item.tag === 'button' || item.type === 'submit') && 
+        (item.text.match(/send|submit|go|chat/i) || item.score > 15)
+    );
+
+    let sent = false;
+
+    if (probableSend) {
+        const el = Heuristics.getElementByAAId(probableSend.id);
+        if (el) {
+            console.log("[System] Clicking mapped Send button:", probableSend.id);
+            el.click();
+            sent = true;
+        }
+    }
+
+    if (!sent) {
+        // 2. Heuristic Backup
+        const btn = Heuristics.findSendButton();
+        if (btn) {
+            console.log("[System] Clicking heuristic Send button");
+            btn.click();
+            sent = true;
+        }
+    }
+
+    // 3. The "Focus-Hunt" (Tab Simulation)
+    // If we haven't sent yet, assume the button is next in tab order
+    if (!sent) {
+        console.log("[System] Attempting Focus-Hunt Submit...");
+        // We can't actually "press tab", but we can find the next focusable element
+        const focusables = Array.from(document.querySelectorAll('button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])'));
+        const index = focusables.indexOf(inputElement);
+        if (index > -1 && index < focusables.length - 1) {
+            const next = focusables[index + 1];
+            if (next) {
+                next.focus();
+                next.click();
+                // If it's not a button, hit enter on it
+                next.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, keyCode: 13, key: 'Enter' }));
+            }
+        }
+    }
+
+    // 4. Always Hammer Enter on Input as failsafe
+    const keyConfig = { bubbles: true, cancelable: true, keyCode: 13, key: 'Enter' };
+    inputElement.dispatchEvent(new KeyboardEvent('keydown', keyConfig));
+    inputElement.dispatchEvent(new KeyboardEvent('keyup', keyConfig));
+}
+
+function updateLog(text, type) {
     const logArea = document.getElementById('aa-log-area');
     if (!logArea) return;
-
-    if (payload.type === "APPEND") {
-        const div = document.createElement('div');
-        div.innerText = payload.content;
-        div.style.cssText = "color: #a3be8c; margin-bottom: 4px; font-size: 12px;";
-        logArea.appendChild(div);
-    } else {
-        const header = document.createElement('div');
-        header.style.cssText = "color: #888; border-bottom: 1px solid #444; margin: 8px 0 4px 0; padding-bottom: 2px;";
-        header.innerText = `Connected: ${payload.url}`;
-        logArea.appendChild(header);
-    }
+    const div = document.createElement('div');
+    div.innerText = text;
+    div.style.cssText = type === "APPEND" 
+        ? "color: #a3be8c; margin-bottom: 4px; font-size: 12px;"
+        : "color: #888; border-bottom: 1px solid #444; margin: 8px 0; padding-bottom: 2px;";
+    logArea.appendChild(div);
     logArea.scrollTop = logArea.scrollHeight;
 }
-
 
 // --- TARGET LOGIC ---
 
 function initTarget() {
   enableInputGuard(); 
-
-  const indicator = document.createElement('div');
-  indicator.innerText = "LINKED";
-  indicator.style.cssText = `
-    position: fixed; bottom: 20px; right: 20px; 
-    background: #bf616a; color: white; padding: 4px 8px; 
-    border-radius: 4px; z-index: 2147483647; 
-    font-family: sans-serif; font-size: 11px; opacity: 0.8;
-  `;
-  document.body.appendChild(indicator);
+  createInterface(false); // false = no input box for target
 
   setTimeout(() => {
-      if (typeof Heuristics === 'undefined') return;
-
       const map = Heuristics.generateMap();
       targetMap = map;
       const contentNode = Heuristics.findMainContent();
       
-      const toolSchema = map.map(item => {
-        return `ID: "${item.id}" | Type: ${item.tag} | Text: "${item.text}"`;
-      }).join('\n');
-
-      const fullReport = `
-TARGET: ${document.title}
-URL: ${window.location.href}
-
-ELEMENTS:
-${toolSchema}
-
-CONTENT:
-${contentNode.innerText.substring(0, 5000)}
-`;
-    chrome.runtime.sendMessage({
-      action: "TARGET_UPDATE",
-      payload: { type: "FULL", content: fullReport, url: window.location.href }
-    });
+      const toolSchema = map.map(item => `ID: "${item.id}" | Type: ${item.tag} | Text: "${item.text}"`).join('\n');
+      const fullReport = `TARGET: ${document.title}\nURL: ${window.location.href}\nELEMENTS:\n${toolSchema}\nCONTENT:\n${contentNode.innerText.substring(0, 5000)}`;
+      
+      chrome.runtime.sendMessage({
+        action: "TARGET_UPDATE",
+        payload: { type: "FULL", content: fullReport, url: window.location.href }
+      });
 
   }, 1000);
 }
 
-// VISUAL ACTION EXECUTION
 function executeCommand(cmd) {
     if (cmd.tool === "interact") {
-        // IMPORTANT: Use Heuristics to find element (Shadow DOM support)
         const el = Heuristics.getElementByAAId(cmd.id);
-        
         if (el) {
-            // 1. Scroll & Highlight
             el.scrollIntoView({ behavior: "smooth", block: "center" });
-            
-            const originalTransition = el.style.transition;
-            const originalOutline = el.style.outline;
-            
-            el.style.transition = "outline 0.2s";
             el.style.outline = "3px solid #a3be8c"; 
-            
-            // 2. Wait 500ms for user to see
             setTimeout(() => {
                 if (cmd.action === "click") el.click();
                 if (cmd.action === "type") {
                     el.value = cmd.value;
                     el.dispatchEvent(new Event('input', {bubbles:true}));
                 }
-                
-                // Cleanup Highlight
-                el.style.outline = originalOutline;
-                el.style.transition = originalTransition;
-                
-                // Report back
+                el.style.outline = "";
                 chrome.runtime.sendMessage({
                   action: "TARGET_UPDATE",
                   payload: { type: "APPEND", content: `OK: ${cmd.action} -> ${cmd.id}` }
@@ -475,7 +452,7 @@ function executeCommand(cmd) {
         } else {
              chrome.runtime.sendMessage({
                   action: "TARGET_UPDATE",
-                  payload: { type: "APPEND", content: `ERROR: Element ${cmd.id} not found (DOM Changed?)` }
+                  payload: { type: "APPEND", content: `ERROR: Element ${cmd.id} not found` }
             });
         }
     } else if (cmd.tool === "browser" && cmd.action === "find") {
