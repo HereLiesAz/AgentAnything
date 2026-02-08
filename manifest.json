@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "AgentAnything",
-  "version": "2.0.0",
-  "description": "Autonomous multi-agent browser orchestration. V2.0",
+  "version": "2.4.0",
+  "description": "Autonomous multi-agent browser orchestration. V2.4 (REST API Tool)",
   "permissions": [
     "scripting",
     "tabs",
@@ -50,7 +50,7 @@
   ],
   "web_accessible_resources": [
     {
-      "resources": ["assets/*"],
+      "resources": ["assets/*", "content/network_hook.js"],
       "matches": ["<all_urls>"]
     }
   ]
