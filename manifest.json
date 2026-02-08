@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "AgentAnything",
-  "version": "2.1.0",
+  "version": "2.2.0",
   "description": "The Panopticon. Turn one tab into the watcher, the others into the watched.",
   "permissions": [
     "activeTab",
@@ -20,13 +20,16 @@
       "128": "icons/icon128.png"
     }
   },
-        "icons": {
+    "icons": {
           "16": "icons/icon16.png",
           "32": "icons/icon32.png",
           "48": "icons/icon48.png",
           "128": "icons/icon128.png"
         },
-        
+  "options_ui": {
+    "page": "options.html",
+    "open_in_tab": true
+  },
   "content_scripts": [
     {
       "matches": ["<all_urls>"],
@@ -35,3 +38,4 @@
     }
   ]
 }
+      
