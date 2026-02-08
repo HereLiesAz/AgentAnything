@@ -89,12 +89,12 @@ function setStatus(text, color) {
 // --- LOGIC ---
 
 function startMessaging() {
-    // Heartbeat
+    // Heartbeat: If we don't know who we are, ask.
     setInterval(() => {
         if (!role) {
             try { chrome.runtime.sendMessage({ action: "HELLO" }); } catch(e) {}
         }
-    }, 1000);
+    }, 2000);
 
     chrome.runtime.onMessage.addListener((msg) => {
         switch (msg.action) {
