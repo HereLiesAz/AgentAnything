@@ -1,4 +1,4 @@
-console.log("%c [AgentAnything] BOOT SEQUENCE INITIATED ", "background: #000; color: #ff00ff; font-size: 16px; font-weight: bold;");
+console.log("%c [AgentAnything] GENESIS PROTOCOL READY ", "background: #000; color: #ff00ff; font-size: 16px; font-weight: bold;");
 
 // --- STATE ---
 let role = null;
@@ -7,25 +7,15 @@ let bootInterval = null;
 
 // --- BOOTSTRAPPER ---
 function boot() {
-    if (!document.body) return; // Wait for DOM
-    if (!window.AA_Heuristics) return; // Wait for Library
+    if (!document.body) return;
+    if (!window.AA_Heuristics) return;
 
     if (bootInterval) clearInterval(bootInterval);
-    console.log("[AgentAnything] DOM & Heuristics Ready. Mounting UI.");
-    
-    // VISUAL CONFIRMATION FLASH
-    const flash = document.createElement('div');
-    flash.style.cssText = "position:fixed; top:0; left:0; width:100vw; height:5px; background:#0f0; z-index:2147483647; pointer-events:none; transition:opacity 1s;";
-    document.body.appendChild(flash);
-    setTimeout(() => flash.style.opacity = 0, 500);
-
+    console.log("[AgentAnything] UI Mounting.");
     ensureUI();
     startMessaging();
 }
-
-// Start polling for boot
 bootInterval = setInterval(boot, 100);
-
 
 // --- UI ENGINE ---
 let shadowHost = null;
@@ -33,43 +23,29 @@ let shadowRoot = null;
 
 function ensureUI() {
     if (shadowHost && shadowHost.isConnected) return;
-
     shadowHost = document.createElement('div');
     shadowHost.id = 'aa-ui-host';
     shadowHost.style.cssText = 'position: fixed; top: 0; left: 0; width: 0; height: 0; z-index: 2147483647; pointer-events: none;';
     document.body.appendChild(shadowHost);
-    
     shadowRoot = shadowHost.attachShadow({ mode: 'closed' });
-    
     const style = document.createElement('style');
     style.textContent = `
         .aa-panel {
-            position: fixed !important; 
-            bottom: 20px !important; 
-            left: 20px !important;
-            background: #1a1a1a !important; 
-            border: 1px solid #333 !important; 
-            color: #e0e0e0 !important;
-            font-family: monospace !important; 
-            font-size: 12px !important; 
-            padding: 8px 12px !important;
-            border-radius: 6px !important; 
-            box-shadow: 0 4px 12px rgba(0,0,0,0.8) !important;
-            display: flex !important; 
-            align-items: center !important; 
-            gap: 10px !important; 
-            pointer-events: auto !important;
-            z-index: 2147483647 !important;
-            min-width: 120px;
+            position: fixed !important; bottom: 20px !important; left: 20px !important;
+            background: #1a1a1a !important; border: 1px solid #333 !important; color: #e0e0e0 !important;
+            font-family: monospace !important; font-size: 12px !important; padding: 8px 12px !important;
+            border-radius: 6px !important; box-shadow: 0 4px 12px rgba(0,0,0,0.8) !important;
+            display: flex !important; align-items: center !important; gap: 10px !important; 
+            pointer-events: auto !important; z-index: 2147483647 !important; min-width: 120px;
         }
         .aa-dot { width: 8px; height: 8px; border-radius: 50%; background: #555; }
         .aa-dot.blue { background: #88c0d0; box-shadow: 0 0 5px #88c0d0; }
         .aa-dot.green { background: #a3be8c; box-shadow: 0 0 5px #a3be8c; }
         .aa-dot.purple { background: #b48ead; box-shadow: 0 0 5px #b48ead; }
         .aa-dot.red { background: #bf616a; box-shadow: 0 0 5px #bf616a; }
+        .aa-dot.yellow { background: #ebcb8b; box-shadow: 0 0 5px #ebcb8b; }
     `;
     shadowRoot.appendChild(style);
-
     const panel = document.createElement('div');
     panel.className = 'aa-panel';
     panel.innerHTML = `<div class="aa-dot" id="dot"></div><span id="txt">STANDBY...</span>`;
@@ -87,9 +63,7 @@ function setStatus(text, color) {
 }
 
 // --- LOGIC ---
-
 function startMessaging() {
-    // Heartbeat: If we don't know who we are, ask.
     setInterval(() => {
         if (!role) {
             try { chrome.runtime.sendMessage({ action: "HELLO" }); } catch(e) {}
@@ -119,9 +93,8 @@ function startMessaging() {
     });
 }
 
-// --- AGENT ---
 function initAgent() {
-    setStatus("AGENT: IDLE", "blue");
+    setStatus("AGENT: READY", "blue");
     const Heuristics = window.AA_Heuristics;
 
     window.addEventListener('keydown', (e) => {
@@ -133,17 +106,17 @@ function initAgent() {
                     e.preventDefault();
                     e.stopImmediatePropagation();
                     
+                    // INTERCEPTION
                     chrome.runtime.sendMessage({ action: "QUEUE_INPUT", source: "USER", payload: val });
                     
                     if(el.value) el.value = "";
                     if(el.innerText) el.innerText = "";
                     
-                    setStatus("SENT TO QUEUE", "purple");
+                    setStatus("GENESIS: SEQUENCE STARTED", "yellow");
                 }
             }
         }
     }, true);
-
     observeAgentOutput();
 }
 
@@ -158,7 +131,6 @@ function injectAgentPrompt(text) {
 
     setStatus("INJECTING...", "purple");
     
-    // Set value safely
     const descriptor = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(input), 'value');
     if (descriptor && descriptor.set) descriptor.set.call(input, text);
     else input.value = text;
@@ -166,11 +138,8 @@ function injectAgentPrompt(text) {
 
     setTimeout(() => {
         const btn = Heuristics.findSendButton();
-        if (btn) {
-            btn.click();
-        } else {
-            input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', keyCode: 13, bubbles: true }));
-        }
+        if (btn) btn.click();
+        else input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', keyCode: 13, bubbles: true }));
         setStatus("AGENT: WORKING", "red");
     }, 500);
 }
@@ -178,9 +147,11 @@ function injectAgentPrompt(text) {
 function observeAgentOutput() {
     const observer = new MutationObserver(() => {
         const bodyText = document.body.innerText;
-        if (bodyText.includes('```json')) {
-             parseCommands(bodyText);
-        }
+        
+        // Execute Commands
+        if (bodyText.includes('```json')) parseCommands(bodyText);
+        
+        // Detect Wait Token
         if (bodyText.includes('[WAITING]')) {
              if (Math.abs(bodyText.length - lastBodyLen) > 50) { 
                 chrome.runtime.sendMessage({ action: "AGENT_READY" });
