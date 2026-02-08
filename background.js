@@ -1,10 +1,9 @@
-// STATE MANAGEMENT
+// STATE
 let agentTabId = null;
 let targetTabIds = new Set();
 let messageQueue = []; 
 let isAgentBusy = false; 
 
-// THE "GHOST" PROMPT - Automatically prepended to every transmission.
 const SYSTEM_PROTOCOL = `
 [SYSTEM HOST]: CONNECTED
 [PROTOCOL]: STRICT JSON-RPC
@@ -25,23 +24,18 @@ chrome.runtime.onInstalled.addListener(() => {
   chrome.storage.session.setAccessLevel({ accessLevel: 'TRUSTED_AND_UNTRUSTED_CONTEXTS' }); 
 });
 
-// --- QUEUE LOGIC ---
+// --- QUEUE ---
 function addToQueue(source, content) {
     messageQueue.push({ source, content, timestamp: Date.now() });
     processQueue();
 }
 
 function processQueue() {
-    // 1. Check Lock and Queue Status
     if (isAgentBusy || !agentTabId || messageQueue.length === 0) return;
 
-    // 2. Lock the Agent
     isAgentBusy = true;
-    
-    // 3. Dequeue Item
     const item = messageQueue.shift();
     
-    // 4. Construct Payload with Auto-Prime
     const finalPayload = `
 ${SYSTEM_PROTOCOL}
 
@@ -54,16 +48,19 @@ ${item.content}
 [INSTRUCTION]: Process this update. Remember to end with "[WAITING]".
 `;
 
-    console.log(`[Queue] Dispatching ${item.source} to Agent`);
+    console.log(`[Queue] Dispatching ${item.source}`);
     
-    // 5. Send to Agent
-    chrome.tabs.sendMessage(agentTabId, { 
-        action: "INJECT_PROMPT", 
-        payload: finalPayload 
-    }).catch(err => {
-        console.warn("Agent unreachable. Releasing lock.");
+    if (agentTabId) {
+        chrome.tabs.sendMessage(agentTabId, { 
+            action: "INJECT_PROMPT", 
+            payload: finalPayload 
+        }).catch(err => {
+            console.warn("Agent unreachable");
+            isAgentBusy = false;
+        });
+    } else {
         isAgentBusy = false;
-    });
+    }
 }
 
 // --- MESSAGING ---
@@ -85,26 +82,17 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       }
     }
 
-    // THE UNLOCK KEY: Agent finished generating
     if (msg.action === "AGENT_READY") {
-        console.log("[System] Agent signaled READY. Waiting 2s before next turn...");
+        console.log("[System] Agent signaled READY.");
         setTimeout(() => {
             isAgentBusy = false;
             processQueue(); 
-        }, 2000); // 2 Second Safety Delay
+        }, 2000); 
     }
 
-    if (msg.action === "QUEUE_INPUT") {
-        addToQueue(msg.source || "USER", msg.payload);
-    }
-
-    if (msg.action === "REMOTE_INJECT") {
-         addToQueue("ADMIN", msg.payload);
-    }
-
-    if (msg.action === "TARGET_UPDATE") {
-        addToQueue("TARGET", msg.payload.content);
-    }
+    if (msg.action === "QUEUE_INPUT") addToQueue(msg.source || "USER", msg.payload);
+    if (msg.action === "REMOTE_INJECT") addToQueue("ADMIN", msg.payload);
+    if (msg.action === "TARGET_UPDATE") addToQueue("TARGET", msg.payload.content);
 
     if (msg.action === "AGENT_COMMAND") {
         targetTabIds.forEach(tId => {
