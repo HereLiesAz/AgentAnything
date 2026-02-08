@@ -194,6 +194,7 @@ function triggerInterception(text, inputEl) {
 
     if (isWaitingForGenesisInput) {
         setStatus("GENESIS PROMPT CAPTURED", "neon");
+        inputEl.style.outline = ""; // Remove green outline immediately
         isWaitingForGenesisInput = false; // Lock UX
 
         // Disable interactions except scrolling
@@ -239,7 +240,7 @@ function injectAgentPrompt(text) {
             input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', keyCode: 13, bubbles: true }));
         }
         setStatus("AGENT: WORKING", "red");
-    }, 500);
+    }, 50); // Reduced delay for immediate execution
 }
 
 function observeAgentOutput() {
