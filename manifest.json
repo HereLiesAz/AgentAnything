@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "AgentAnything",
-  "version": "0.3.6",
-  "description": "Remote Control for AI Agents.",
+  "version": "0.4.0",
+  "description": "Remote Control for AI Agents. Type-6 Hardened.",
   "permissions": [
     "activeTab",
     "scripting",
