@@ -3,11 +3,14 @@
   "name": "AgentAnything",
   "version": "0.2.6",
   "description": "Turn one tab into the Agent, another tab into its tool.",
-  "permissions": [
+"permissions": [
     "activeTab",
     "scripting",
     "tabs",
     "storage"
+  ],
+  "host_permissions": [
+    "<all_urls>"
   ],
   "background": {
     "service_worker": "background.js"
