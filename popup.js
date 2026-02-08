@@ -8,27 +8,25 @@ document.addEventListener('DOMContentLoaded', async () => {
     const btnTarget = document.getElementById('btn-target');
     const btnInject = document.getElementById('btn-inject');
     const btnKill = document.getElementById('btn-kill');
-    const roleIndicator = document.getElementById('role-indicator');
+    const btnOptions = document.getElementById('btn-options');
+    const btnOptionsActive = document.getElementById('btn-options-active');
 
     // 1. CHECK STATE
     const store = await chrome.storage.session.get(['agentTabId', 'targetTabIds']);
     const hasAgent = !!store.agentTabId;
     const hasTarget = store.targetTabIds && store.targetTabIds.length > 0;
     
-    // STRICT GATEKEEPING
     if (hasAgent && hasTarget) {
         viewSetup.style.display = 'none';
         viewActive.style.display = 'block';
-        roleIndicator.innerText = `[${store.targetTabIds.length} Targets]`;
     } else {
         viewSetup.style.display = 'block';
         viewActive.style.display = 'none';
         
-        // Update Setup Buttons
         if (hasAgent) {
             btnAgent.innerText = "AGENT ASSIGNED ✅";
             btnAgent.classList.add('btn-done');
-            btnAgent.disabled = true;
+            btnAgent.disabled = true; 
             btnTarget.classList.add('btn-pulse');
         }
         
@@ -60,12 +58,9 @@ document.addEventListener('DOMContentLoaded', async () => {
         btnInject.disabled = true;
         btnInject.innerText = "SENDING...";
 
-        chrome.tabs.sendMessage(store.agentTabId, { 
+        chrome.runtime.sendMessage({ 
             action: "REMOTE_INJECT", 
             payload: text 
-        }).catch(err => {
-             console.error("Injection Failed", err);
-             btnInject.innerText = "FAILED (Check Console)";
         });
 
         setTimeout(() => { 
@@ -78,9 +73,21 @@ document.addEventListener('DOMContentLoaded', async () => {
     // 5. DISENGAGE
     const handleDisengage = () => {
         chrome.runtime.sendMessage({ action: "DISENGAGE_ALL" });
-        setTimeout(() => window.close(), 500);
+        setTimeout(() => location.reload(), 500);
+    };
+
+    // 6. OPTIONS LINK
+    const openOptions = () => {
+        if (chrome.runtime.openOptionsPage) {
+            chrome.runtime.openOptionsPage();
+        } else {
+            window.open(chrome.runtime.getURL('options.html'));
+        }
     };
 
     btnKill.onclick = handleDisengage;
     document.getElementById('btn-reset-setup').onclick = handleDisengage;
+    
+    if(btnOptions) btnOptions.onclick = openOptions;
+    if(btnOptionsActive) btnOptionsActive.onclick = openOptions;
 });
