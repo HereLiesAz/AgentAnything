@@ -40,7 +40,14 @@
         candidates.sort((a, b) => {
             const rectA = a.getBoundingClientRect();
             const rectB = b.getBoundingClientRect();
-            return (rectB.width * rectB.height) - (rectA.width * rectA.height);
+            const areaA = rectA.width * rectA.height;
+            const areaB = rectB.width * rectB.height;
+
+            // Prioritize contenteditable/rich text areas
+            const scoreA = (a.isContentEditable || a.getAttribute('role') === 'textbox') ? areaA * 1.5 : areaA;
+            const scoreB = (b.isContentEditable || b.getAttribute('role') === 'textbox') ? areaB * 1.5 : areaB;
+
+            return scoreB - scoreA;
         });
         return candidates[0] || null;
       },
@@ -66,7 +73,7 @@
             if (rect.width < 10 || rect.height < 10) return false;
             const tag = el.tagName;
             return (tag === 'BUTTON' || tag === 'A' || tag === 'INPUT' || tag === 'TEXTAREA' || el.getAttribute('role') === 'button');
-        }).slice(0, 25).map(el => {
+        }).slice(0, 100).map(el => {
             if (!el.dataset.aaId) el.dataset.aaId = `aa-${Math.random().toString(36).substr(2, 5)}`;
             return {
               id: el.dataset.aaId,
