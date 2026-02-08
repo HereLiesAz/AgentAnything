@@ -15,9 +15,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
     if (message.action === "HELLO" && tabId) {
       if (tabId === store.agentTabId) {
-        chrome.tabs.sendMessage(tabId, { action: "INIT_AGENT" });
+        chrome.tabs.sendMessage(tabId, { action: "INIT_AGENT" }).catch(() => {});
       } else if (targetTabIds.has(tabId)) {
-        chrome.tabs.sendMessage(tabId, { action: "INIT_TARGET", tabId: tabId });
+        chrome.tabs.sendMessage(tabId, { action: "INIT_TARGET", tabId: tabId }).catch(() => {});
       }
       return;
     }
@@ -41,7 +41,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       if (message.payload.tool === "browser") {
         handleBrowserAction(targetId, message.payload);
       } else {
-        chrome.tabs.sendMessage(targetId, { action: "EXECUTE_COMMAND", command: message.payload });
+        chrome.tabs.sendMessage(targetId, { action: "EXECUTE_COMMAND", command: message.payload }).catch(() => {});
       }
     }
 
@@ -49,14 +49,14 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       if (JSON.stringify(message.payload) === JSON.stringify(store.lastTargetPayload)) return; 
       await chrome.storage.session.set({ lastTargetPayload: message.payload, lastTargetSourceId: tabId });
       if (store.agentTabId) {
-        chrome.tabs.sendMessage(store.agentTabId, { action: "INJECT_UPDATE", sourceId: tabId, payload: message.payload });
+        chrome.tabs.sendMessage(store.agentTabId, { action: "INJECT_UPDATE", sourceId: tabId, payload: message.payload }).catch(() => {});
       }
     }
 
     if (message.action === "DISENGAGE_ALL") {
         await chrome.storage.session.clear();
-        if (store.agentTabId) chrome.tabs.sendMessage(store.agentTabId, { action: "DISENGAGE_LOCAL" });
-        targetTabIds.forEach(tId => chrome.tabs.sendMessage(tId, { action: "DISENGAGE_LOCAL" }));
+        if (store.agentTabId) chrome.tabs.sendMessage(store.agentTabId, { action: "DISENGAGE_LOCAL" }).catch(() => {});
+        targetTabIds.forEach(tId => chrome.tabs.sendMessage(tId, { action: "DISENGAGE_LOCAL" }).catch(() => {}));
     }
 
   })();
@@ -69,7 +69,7 @@ function handleBrowserAction(tabId, cmd) {
     case "back": chrome.tabs.goBack(tabId); break;
     case "forward": chrome.tabs.goForward(tabId); break;
     case "close": chrome.tabs.remove(tabId); break;
-    case "find": chrome.tabs.sendMessage(tabId, { action: "EXECUTE_COMMAND", command: cmd }); break;
+    case "find": chrome.tabs.sendMessage(tabId, { action: "EXECUTE_COMMAND", command: cmd }).catch(() => {}); break;
   }
 }
 
