@@ -158,6 +158,15 @@ async function queueGenesisInstructions() {
     if (contextBlock) {
         await addToQueue("CORTEX_MEMORY", contextBlock);
     }
+
+    if (contextBlock) {
+        await addToQueue("CORTEX_MEMORY", contextBlock);
+    }
+}
+
+async function handleUserPrompt(userText) {
+    // Just queue the user prompt directly. Genesis should be pre-queued by ASSIGN_ROLE.
+    await addToQueue("USER", userText);
 }
 
 async function handleUserPrompt(userText) {

@@ -154,6 +154,14 @@ function initAgent() {
         }
     }, true);
 
+    window.addEventListener('focus', (e) => {
+        if (['INPUT','TEXTAREA'].includes(e.target.tagName) || e.target.isContentEditable) {
+            activeInput = e.target;
+            // Maintain highlight if in genesis mode
+            if (isWaitingForGenesisInput) e.target.style.outline = "3px solid #00ff00";
+        }
+    }, true);
+
     // CLICK TRAP (Restored Logic)
     window.addEventListener('click', (e) => {
         const path = e.composedPath();
