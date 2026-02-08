@@ -1,11 +1,41 @@
 // STATE
-let agentTabId = null;
-let targetTabIds = new Set();
+// MV3 Service Worker State Management
+const DEFAULT_STATE = {
+    agentTabId: null,
+    targetTabIds: [], // Array for storage compatibility
+    messageQueue: [],
+    isAgentBusy: false,
+    isGenesisComplete: false,
+    pendingGenesisPrompt: null
+};
 
-let messageQueue = []; 
-let isAgentBusy = false; 
-let isGenesisComplete = false; 
-let pendingGenesisPrompt = null; 
+// Helper to get state with defaults
+async function getState() {
+    const data = await chrome.storage.session.get(DEFAULT_STATE);
+    // Ensure targetTabIds is an array (storage handles it, but just in case)
+    if (!Array.isArray(data.targetTabIds)) data.targetTabIds = [];
+    return { ...DEFAULT_STATE, ...data };
+}
+
+// Helper to update state
+async function updateState(updates) {
+    await chrome.storage.session.set(updates);
+}
+
+// Mutex for state synchronization
+let stateMutex = Promise.resolve();
+
+async function withLock(fn) {
+    const next = stateMutex.then(async () => {
+        try {
+            await fn();
+        } catch (e) {
+            console.error("Error in withLock", e);
+        }
+    });
+    stateMutex = next;
+    return next;
+}
 
 const SYSTEM_INSTRUCTIONS = `
 [SYSTEM HOST]: CONNECTED
@@ -31,18 +61,40 @@ chrome.runtime.onInstalled.addListener(() => {
 });
 
 // --- QUEUE LOGIC ---
-function addToQueue(source, content, forceImmediate = false) {
+async function addToQueue(source, content, forceImmediate = false) {
+    const state = await getState();
     const item = { source, content, timestamp: Date.now() };
-    if (forceImmediate) messageQueue.unshift(item);
-    else messageQueue.push(item);
-    processQueue();
+
+    let newQueue = [...state.messageQueue];
+    if (forceImmediate) newQueue.unshift(item);
+    else newQueue.push(item);
+
+    await updateState({ messageQueue: newQueue });
+    await processQueue();
 }
 
-function processQueue() {
-    if (isAgentBusy || !agentTabId || messageQueue.length === 0) return;
+async function processQueue() {
+    const state = await getState();
+    if (state.isAgentBusy || !state.agentTabId || state.messageQueue.length === 0) return;
 
-    isAgentBusy = true;
-    const item = messageQueue.shift();
+    // Lock
+    await updateState({ isAgentBusy: true });
+
+    // Get item
+    // We must fetch state again? No, we just locked it. But messageQueue might have changed?
+    // In single threaded JS, if we didn't await between read and lock, we are fine.
+    // But we did await updateState.
+    // Let's rely on the state we read, but verify queue length.
+
+    // Actually, let's just use the state we have, but we need to pop the item.
+    let currentQueue = [...state.messageQueue];
+    if (currentQueue.length === 0) {
+        await updateState({ isAgentBusy: false });
+        return;
+    }
+
+    const item = currentQueue.shift();
+    await updateState({ messageQueue: currentQueue });
     
     let finalPayload = "";
     if (item.source === "SYSTEM_INIT") {
@@ -61,23 +113,28 @@ ${item.content}
         console.log(`[Queue] Dispatching ${item.source}`);
     }
 
-    chrome.tabs.sendMessage(agentTabId, { 
+    chrome.tabs.sendMessage(state.agentTabId, {
         action: "INJECT_PROMPT", 
         payload: finalPayload 
-    }).catch(err => {
+    }).catch(async (err) => {
         console.warn("Agent unreachable");
-        isAgentBusy = false;
+        await updateState({ isAgentBusy: false });
     });
 }
 
 // --- SEQUENCER & MEMORY ---
 async function handleUserPrompt(userText) {
-    if (!isGenesisComplete) {
+    let state = await getState();
+
+    if (!state.isGenesisComplete) {
         console.log("[Sequencer] GENESIS TRIGGERED.");
-        pendingGenesisPrompt = userText;
+        // We don't store pendingGenesisPrompt anymore, just use it immediately?
+        // Logic used pendingGenesisPrompt to queue it later.
+
+        await updateState({ pendingGenesisPrompt: userText });
         
         // 1. Queue Protocol
-        addToQueue("SYSTEM_INIT", SYSTEM_INSTRUCTIONS, true);
+        await addToQueue("SYSTEM_INIT", SYSTEM_INSTRUCTIONS, true);
         
         // 2. Queue Memory (Universal + Domain)
         const memory = await chrome.storage.sync.get({ universalContext: '', domainContexts: {} });
@@ -104,46 +161,66 @@ async function handleUserPrompt(userText) {
         }
         
         if (contextBlock) {
-            addToQueue("CORTEX_MEMORY", contextBlock);
+            await addToQueue("CORTEX_MEMORY", contextBlock);
         }
         
         // 3. Queue Target Map
         const mapContent = store.lastTargetPayload ? store.lastTargetPayload.content : "NO TARGET CONNECTED YET";
-        addToQueue("TARGET", mapContent);
+        await addToQueue("TARGET", mapContent);
         
         // 4. Queue User Prompt
-        addToQueue("USER", pendingGenesisPrompt);
+        // Refetch state to get pendingGenesisPrompt (although we just set it)
+        state = await getState();
+        await addToQueue("USER", state.pendingGenesisPrompt);
         
-        isGenesisComplete = true;
+        await updateState({ isGenesisComplete: true });
     } else {
-        addToQueue("USER", userText);
+        await addToQueue("USER", userText);
     }
 }
 
 // --- MESSAGING ---
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
-  (async () => {
+  withLock(async () => {
     const senderTabId = sender.tab ? sender.tab.id : null;
+    let state = await getState();
 
     if (msg.action === "HELLO" && senderTabId) {
-        if (agentTabId === senderTabId) chrome.tabs.sendMessage(senderTabId, { action: "INIT_AGENT" });
-        else if (targetTabIds.has(senderTabId)) chrome.tabs.sendMessage(senderTabId, { action: "INIT_TARGET" });
+        if (state.agentTabId === senderTabId) {
+            chrome.tabs.sendMessage(senderTabId, { action: "INIT_AGENT" });
+        } else if (state.targetTabIds.includes(senderTabId)) {
+            chrome.tabs.sendMessage(senderTabId, { action: "INIT_TARGET" });
+        }
         return;
     }
 
     if (msg.action === "ASSIGN_ROLE") {
       const targetId = msg.tabId;
       if (msg.role === "AGENT") {
-        agentTabId = targetId;
-        targetTabIds.delete(targetId);
-        messageQueue = [];
-        isAgentBusy = false;
-        isGenesisComplete = false; 
-        pendingGenesisPrompt = null;
+        // Remove from targets if present
+        let newTargets = state.targetTabIds.filter(id => id !== targetId);
+
+        await updateState({
+            agentTabId: targetId,
+            targetTabIds: newTargets,
+            messageQueue: [],
+            isAgentBusy: false,
+            isGenesisComplete: false,
+            pendingGenesisPrompt: null
+        });
+
         chrome.tabs.sendMessage(targetId, { action: "INIT_AGENT" });
       } else {
-        targetTabIds.add(targetId);
-        if (agentTabId === targetId) agentTabId = null;
+        // Add to targets, remove from agent if matching
+        let newAgentId = state.agentTabId === targetId ? null : state.agentTabId;
+        let newTargets = [...state.targetTabIds];
+        if (!newTargets.includes(targetId)) newTargets.push(targetId);
+
+        await updateState({
+            agentTabId: newAgentId,
+            targetTabIds: newTargets
+        });
+
         chrome.tabs.sendMessage(targetId, { action: "INIT_TARGET" });
       }
     }
@@ -151,35 +228,51 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     if (msg.action === "AGENT_READY") {
         console.log("[System] Agent signaled [WAITING]. Unlock.");
         setTimeout(() => {
-            isAgentBusy = false;
-            processQueue(); 
+            withLock(async () => {
+                await updateState({ isAgentBusy: false });
+                await processQueue();
+            });
         }, 2000); 
     }
 
-    if (msg.action === "QUEUE_INPUT") handleUserPrompt(msg.payload);
+    if (msg.action === "QUEUE_INPUT") {
+        await handleUserPrompt(msg.payload);
+    }
 
     if (msg.action === "TARGET_UPDATE") {
         await chrome.storage.session.set({ lastTargetPayload: msg.payload });
-        if (isGenesisComplete) addToQueue("TARGET", msg.payload.content);
+        // Check state again as handleUserPrompt might have changed it? No, just read it.
+        state = await getState();
+        if (state.isGenesisComplete) {
+            await addToQueue("TARGET", msg.payload.content);
+        }
     }
 
     if (msg.action === "AGENT_COMMAND") {
-        targetTabIds.forEach(tId => {
-            chrome.tabs.sendMessage(tId, { action: "EXECUTE_COMMAND", command: msg.payload }).catch(() => targetTabIds.delete(tId));
+        state.targetTabIds.forEach(tId => {
+            chrome.tabs.sendMessage(tId, { action: "EXECUTE_COMMAND", command: msg.payload }).catch(async () => {
+                // If failed, remove from targets
+                const freshState = await getState();
+                const newTargets = freshState.targetTabIds.filter(id => id !== tId);
+                await updateState({ targetTabIds: newTargets });
+            });
         });
     }
 
     if (msg.action === "DISENGAGE_ALL") {
-        if (agentTabId) chrome.tabs.sendMessage(agentTabId, { action: "DISENGAGE_LOCAL" }).catch(() => {});
-        targetTabIds.forEach(tId => chrome.tabs.sendMessage(tId, { action: "DISENGAGE_LOCAL" }).catch(() => {}));
-        agentTabId = null;
-        targetTabIds.clear();
-        messageQueue = [];
-        isAgentBusy = false;
-        isGenesisComplete = false;
+        if (state.agentTabId) chrome.tabs.sendMessage(state.agentTabId, { action: "DISENGAGE_LOCAL" }).catch(() => {});
+        state.targetTabIds.forEach(tId => chrome.tabs.sendMessage(tId, { action: "DISENGAGE_LOCAL" }).catch(() => {}));
+
+        await updateState(DEFAULT_STATE);
         await chrome.storage.session.clear();
+        await chrome.storage.session.remove(Object.keys(DEFAULT_STATE));
+        await updateState(DEFAULT_STATE);
     }
 
-  })();
+    // REMOTE_INJECT support for Popup
+    if (msg.action === "REMOTE_INJECT") {
+         await handleUserPrompt(msg.payload);
+    }
+  });
   return true;
 });
