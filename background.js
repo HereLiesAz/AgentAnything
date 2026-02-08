@@ -40,51 +40,49 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     const store = await chrome.storage.session.get(['agentTabId', 'targetTabIds', 'lastTargetPayload', 'lastTargetSourceId']);
     const targetTabIds = new Set(store.targetTabIds || []);
 
-    // Reconnection Handshake
+    // 1. GET LATEST TARGET (Synchronous-ish retrieval for Trap & Swap)
+    if (message.action === "GET_LATEST_TARGET") {
+        if (store.lastTargetPayload) {
+            sendResponse({ 
+                content: store.lastTargetPayload.content, 
+                url: store.lastTargetPayload.url 
+            });
+        } else {
+            sendResponse({ content: "NO TARGET CONNECTED", url: "N/A" });
+        }
+        return; // End execution for this branch
+    }
+
+    // 2. Reconnection Handshake
     if (message.action === "HELLO" && tabId) {
       if (tabId === store.agentTabId) {
         chrome.tabs.sendMessage(tabId, { action: "INIT_AGENT" });
-        if (store.lastTargetPayload && store.lastTargetSourceId) {
-          setTimeout(() => {
-            chrome.tabs.sendMessage(tabId, {
-              action: "INJECT_UPDATE",
-              sourceId: store.lastTargetSourceId,
-              payload: store.lastTargetPayload
-            });
-          }, 500);
-        }
+        // Note: In Trap & Swap, we don't auto-inject on reconnect. We wait for user input.
       } else if (targetTabIds.has(tabId)) {
         chrome.tabs.sendMessage(tabId, { action: "INIT_TARGET", tabId: tabId });
       }
       return;
     }
 
-    // Role Assignment
+    // 3. Role Assignment
     if (message.action === "ASSIGN_ROLE") {
       if (message.role === "AGENT") {
         await chrome.storage.session.set({ agentTabId: message.tabId });
         targetTabIds.delete(message.tabId); 
         await chrome.storage.session.set({ targetTabIds: Array.from(targetTabIds) });
-        
-        if (store.lastTargetPayload && store.lastTargetSourceId) {
-          chrome.tabs.sendMessage(message.tabId, {
-            action: "INJECT_UPDATE",
-            sourceId: store.lastTargetSourceId,
-            payload: store.lastTargetPayload
-          });
-        }
+        console.log(`[System] Agent Assigned: ${message.tabId}`);
       } else {
         targetTabIds.add(message.tabId);
         await chrome.storage.session.set({ targetTabIds: Array.from(targetTabIds) });
-        
         if (store.agentTabId === message.tabId) {
             await chrome.storage.session.set({ agentTabId: null });
         }
+        console.log(`[System] Target Assigned: ${message.tabId}`);
       }
       return;
     }
 
-    // Agent Commands
+    // 4. Agent Commands
     if (message.action === "AGENT_COMMAND") {
       const targetId = message.payload.targetTabId || store.lastTargetSourceId;
       if (!targetId) return;
@@ -99,18 +97,18 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       }
     }
 
-    // Target Updates
+    // 5. Target Updates
     if (message.action === "TARGET_UPDATE") {
-      const newPayloadStr = JSON.stringify(message.payload);
-      const oldPayloadStr = JSON.stringify(store.lastTargetPayload);
-
-      if (newPayloadStr === oldPayloadStr) return; 
+      // Deduplication
+      if (JSON.stringify(message.payload) === JSON.stringify(store.lastTargetPayload)) return; 
 
       await chrome.storage.session.set({ 
           lastTargetPayload: message.payload,
           lastTargetSourceId: tabId 
       });
 
+      // We only notify the Agent if it's listening. 
+      // In Trap & Swap, the Agent might be idle, but we send updates for the log.
       if (store.agentTabId) {
         chrome.tabs.sendMessage(store.agentTabId, {
           action: "INJECT_UPDATE",
@@ -119,9 +117,28 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         });
       }
     }
+
+    // 6. DISENGAGE PROTOCOL
+    if (message.action === "DISENGAGE_ALL") {
+        console.log("[System] DISENGAGE PROTOCOL INITIATED");
+        
+        // Clear State
+        await chrome.storage.session.clear();
+        
+        // Reload Agent
+        if (store.agentTabId) {
+             chrome.tabs.sendMessage(store.agentTabId, { action: "DISENGAGE_LOCAL" });
+        }
+        
+        // Reload Targets
+        targetTabIds.forEach(tId => {
+            chrome.tabs.sendMessage(tId, { action: "DISENGAGE_LOCAL" });
+        });
+    }
+
   })();
   
-  return true;
+  return true; // Keep message channel open for async sendResponse
 });
 
 // --- BROWSER ACTIONS ---
