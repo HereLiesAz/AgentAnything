@@ -1,338 +1,319 @@
-// STATE
-// MV3 Service Worker State Management
+// Service Worker V2.0 (Store-First Architecture)
+console.log("[AgentAnything] Background Service Worker V2 Loaded");
+
+// --- Configuration (Options) ---
+let CONFIG = { redactPII: true, debugMode: false, privacyAccepted: false };
+
+async function loadConfig() {
+    const items = await chrome.storage.sync.get({ redactPII: true, debugMode: false, privacyAccepted: false });
+    CONFIG = items;
+    log("[System] Config Loaded:", CONFIG);
+}
+
+function log(msg, ...args) {
+    if (CONFIG.debugMode) console.log(msg, ...args);
+}
+
+chrome.runtime.onStartup.addListener(loadConfig);
+chrome.runtime.onInstalled.addListener(() => {
+    chrome.storage.session.setAccessLevel({ accessLevel: 'TRUSTED_AND_UNTRUSTED_CONTEXTS' });
+
+    // Onboarding
+    chrome.storage.sync.get(['privacyAccepted'], (res) => {
+        if (!res.privacyAccepted) {
+            chrome.tabs.create({ url: 'welcome.html' });
+        }
+    });
+    loadConfig();
+});
+
+loadConfig();
+
+chrome.storage.onChanged.addListener((changes, area) => {
+    if (area === 'sync') {
+        if (changes.redactPII) CONFIG.redactPII = changes.redactPII.newValue;
+        if (changes.debugMode) CONFIG.debugMode = changes.debugMode.newValue;
+        if (changes.privacyAccepted) CONFIG.privacyAccepted = changes.privacyAccepted.newValue;
+        log("[System] Config Updated:", CONFIG);
+    }
+});
+
+
+// --- 1. State Persistence ---
 const DEFAULT_STATE = {
     agentTabId: null,
-    targetTabIds: [], // Array for storage compatibility
-    messageQueue: [],
+    targetTabs: [],
+    commandQueue: [],
     isAgentBusy: false,
     busySince: 0,
-    isGenesisComplete: false,
-    pendingGenesisPrompt: null
+    elementMap: {},
+    lastActionTimestamp: 0
 };
 
-// Helper to get state with defaults
 async function getState() {
-    const data = await chrome.storage.session.get(DEFAULT_STATE);
-    // Ensure targetTabIds is an array (storage handles it, but just in case)
-    if (!Array.isArray(data.targetTabIds)) data.targetTabIds = [];
+    const data = await chrome.storage.local.get(DEFAULT_STATE);
+    if (!Array.isArray(data.targetTabs)) data.targetTabs = [];
+    if (!Array.isArray(data.commandQueue)) data.commandQueue = [];
+    if (!data.elementMap) data.elementMap = {};
     return { ...DEFAULT_STATE, ...data };
 }
 
-// Helper to update state
 async function updateState(updates) {
-    await chrome.storage.session.set(updates);
+    await chrome.storage.local.set(updates);
 }
 
-// Safe Message Sender
-async function safeSendMessage(tabId, message) {
-    try {
-        await chrome.tabs.sendMessage(tabId, message);
-        return true;
-    } catch (e) {
-        // Suppress "Receiving end does not exist" which happens if tab is reloading or closed
-        console.log(`[System] Message to ${tabId} failed:`, e.message);
-        return false;
-    }
-}
-
-// Mutex for state synchronization
-let stateMutex = Promise.resolve();
-
-async function withLock(fn) {
-    const next = stateMutex.then(async () => {
-        try {
-            await fn();
-        } catch (e) {
-            console.error("Error in withLock", e);
-        }
+// --- 2. Keep-Alive ---
+let keepAliveInterval;
+async function createOffscreen() {
+  try {
+    if (await chrome.offscreen.hasDocument()) return;
+    await chrome.offscreen.createDocument({
+      url: 'offscreen.html',
+      reasons: ['DOM_PARSING'],
+      justification: 'Keep service worker alive'
     });
-    stateMutex = next;
-    return next;
+  } catch (e) { log("Offscreen warning:", e); }
 }
 
-const SYSTEM_INSTRUCTIONS = `
-[SYSTEM HOST]: CONNECTED
-[PROTOCOL]: STRICT JSON-RPC
-[ROLE]: You are AgentAnything. You control a remote browser tab.
+function startKeepAlive() {
+  createOffscreen();
+  if (keepAliveInterval) clearInterval(keepAliveInterval);
+  keepAliveInterval = setInterval(() => {
+    chrome.runtime.sendMessage({ target: 'offscreen', action: 'ping' });
+    checkTimeout();
+  }, 20000);
+}
+chrome.runtime.onStartup.addListener(startKeepAlive);
+startKeepAlive();
 
-[COMMANDS]:
-1. INTERACT: \`\`\`json { "tool": "interact", "id": "...", "action": "click"|"type", "value": "..." } \`\`\`
-2. BROWSER:  \`\`\`json { "tool": "browser", "action": "refresh"|"back"|"find", "value": "..." } \`\`\`
+// --- 3. Command Processing ---
 
-[RULES]:
-1. You will receive a TARGET MAP shortly.
-2. Analyze the [INCOMING TRANSMISSION] queue.
-3. Output JSON commands if action is required.
-4. CRITICAL: You MUST end your response with the strictly distinct token: "[WAITING]"
-5. The system will NOT send you new data until it sees "[WAITING]".
-
-ACKNOWLEDGE with "[WAITING]" if you understand.
-`;
-
-chrome.runtime.onInstalled.addListener(() => {
-  chrome.storage.session.setAccessLevel({ accessLevel: 'TRUSTED_AND_UNTRUSTED_CONTEXTS' }); 
+chrome.storage.onChanged.addListener((changes, area) => {
+    if (area === 'local' && changes.commandQueue) {
+        const newQueue = changes.commandQueue.newValue;
+        if (newQueue && newQueue.length > 0) {
+            processQueue(newQueue);
+        }
+    }
 });
 
-// --- QUEUE LOGIC ---
-async function addToQueue(source, content, forceImmediate = false) {
-    const state = await getState();
-    const item = { source, content, timestamp: Date.now() };
+let isProcessing = false;
 
-    let newQueue = [...state.messageQueue];
-    if (forceImmediate) newQueue.unshift(item);
-    else newQueue.push(item);
+async function processQueue(queue) {
+    if (isProcessing) return;
+    isProcessing = true;
 
-    await updateState({ messageQueue: newQueue });
-    await processQueue();
-}
+    try {
+        const item = queue[0];
+        if (!item) { isProcessing = false; return; }
 
-async function processQueue() {
-    const state = await getState();
+        // Enforce Privacy Acceptance
+        if (!CONFIG.privacyAccepted) {
+            console.warn("[System] Privacy Warning not accepted. Blocking command.");
+            // Open welcome page again if needed? Or just ignore?
+            // Dequeue to prevent loop? Or notify user?
+            // Notify user via alert?
+            // Let's remove from queue and open welcome page.
 
-    // Check for deadlock timeout (3 minutes)
-    if (state.isAgentBusy) {
-        if (Date.now() - (state.busySince || 0) > 180000) {
-            console.warn("[System] Agent deadlock detected. Forcing unlock.");
-            await updateState({ isAgentBusy: false, busySince: 0 });
-            // Continue processing
-        } else {
+            await updateState({ commandQueue: queue.slice(1) }); // Remove
+            chrome.tabs.create({ url: 'welcome.html' });
+
+            isProcessing = false;
             return;
         }
-    }
 
-    if (!state.agentTabId || state.messageQueue.length === 0) return;
+        log(`[Queue] Processing: ${item.type}`);
 
-    // Atomic: Lock AND Dequeue
-    let currentQueue = [...state.messageQueue];
-    const item = currentQueue.shift();
+        const state = await getState();
+        const agentId = state.agentTabId;
 
-    await updateState({
-        isAgentBusy: true,
-        busySince: Date.now(),
-        messageQueue: currentQueue
-    });
-    
-    let finalPayload = "";
-    if (item.source === "SYSTEM_INIT") {
-        finalPayload = item.content; // Raw injection
-        console.log("[Queue] Dispatching GENESIS INSTRUCTIONS");
-    } else {
-        finalPayload = `
-[INCOMING TRANSMISSION]
-SOURCE: ${item.source}
-TIMESTAMP: ${new Date(item.timestamp).toLocaleTimeString()}
---------------------------------------------------
-${item.content}
---------------------------------------------------
-[INSTRUCTION]: Process. End with "[WAITING]".
-`;
-        console.log(`[Queue] Dispatching ${item.source}`);
-    }
+        if (item.type === 'UPDATE_AGENT') {
+            if (agentId) {
+                const safePayload = `<browsing_context>\n${item.payload}\n</browsing_context>`;
+                await sendMessageToTab(agentId, {
+                    action: "BUFFER_UPDATE",
+                    text: safePayload
+                });
 
-    const success = await safeSendMessage(state.agentTabId, {
-        action: "INJECT_PROMPT", 
-        payload: finalPayload 
-    });
+                await updateState({ lastActionTimestamp: 0 });
+            }
+        }
 
-    if (!success) {
-        console.warn("Agent unreachable");
-        await updateState({ isAgentBusy: false, busySince: 0 });
+        if (item.type === 'CLICK_TARGET') {
+             const cmd = item.payload;
+             let targetId = cmd.targetId;
+
+             if (!targetId && cmd.id && state.elementMap[cmd.id]) {
+                 targetId = state.elementMap[cmd.id];
+             }
+
+             let targetsToTry = state.targetTabs;
+             if (targetId) {
+                 const t = state.targetTabs.find(tab => tab.tabId === targetId);
+                 if (t) targetsToTry = [t];
+             }
+
+             let executed = false;
+             for (const t of targetsToTry) {
+                 const res = await sendMessageToTab(t.tabId, { action: "GET_COORDINATES", id: cmd.id });
+                 if (res && res.found) {
+                     log(`[System] Executing on Target Tab ${t.tabId}`);
+                     if (cmd.action === 'click') {
+                         await executeBackgroundClick(t.tabId, res.x, res.y);
+                     } else if (cmd.action === 'type') {
+                         await executeBackgroundType(t.tabId, res.x, res.y, cmd.value);
+                     }
+                     executed = true;
+                     await updateState({ lastActionTimestamp: Date.now() });
+                     break;
+                 }
+             }
+
+             if (!executed) {
+                 log(`[System] Failed to execute command. Element ID ${cmd.id} not found.`);
+                 await enqueue({ type: 'UPDATE_AGENT', payload: `System Error: Element ID ${cmd.id} not found.` });
+             }
+        }
+
+        const remaining = queue.slice(1);
+        await updateState({ commandQueue: remaining });
+
+    } catch (e) {
+        console.error("Queue Processing Error:", e);
+    } finally {
+        isProcessing = false;
     }
 }
 
-// --- SEQUENCER & MEMORY ---
-async function queueGenesisInstructions() {
-    // 1. Queue Protocol
-    await addToQueue("SYSTEM_INIT", SYSTEM_INSTRUCTIONS);
-
-    // 2. Queue Memory (Universal + Domain)
-    const memory = await chrome.storage.sync.get({ universalContext: '', domainContexts: {} });
-    const store = await chrome.storage.session.get(['lastTargetPayload']);
-
-    let contextBlock = "";
-
-    // Universal
-    if (memory.universalContext) {
-        contextBlock += `[UNIVERSAL MEMORY]:\n${memory.universalContext}\n\n`;
+// Timeout Logic (15s)
+async function checkTimeout() {
+    const state = await getState();
+    if (state.lastActionTimestamp > 0 && (Date.now() - state.lastActionTimestamp > 15000)) {
+        log("[System] Action Timeout. No DOM change detected.");
+        await updateState({ lastActionTimestamp: 0 });
+        await enqueue({ type: 'UPDATE_AGENT', payload: "System: Action executed but no DOM change detected within 15 seconds." });
     }
+}
 
-    // Domain Specific
-    if (store.lastTargetPayload && store.lastTargetPayload.url) {
-        const targetUrl = new URL(store.lastTargetPayload.url);
-        const domain = targetUrl.hostname;
+
+// --- 4. Execution Engine ---
+
+async function executeBackgroundClick(tabId, x, y) {
+    const target = { tabId };
+    try {
+        await chrome.debugger.attach(target, "1.3");
+        await chrome.debugger.sendCommand(target, "Input.dispatchMouseEvent", {
+            type: "mousePressed", x, y, button: "left", clickCount: 1
+        });
+        await chrome.debugger.sendCommand(target, "Input.dispatchMouseEvent", {
+            type: "mouseReleased", x, y, button: "left", clickCount: 1
+        });
+    } catch (e) {
+        log(`Debugger click failed on ${tabId}: ${e.message}`);
+    } finally {
+        try { await chrome.debugger.detach(target); } catch(e) { console.error(e); }
+    }
+}
+
+async function executeBackgroundType(tabId, x, y, value) {
+    const target = { tabId };
+    try {
+        await chrome.debugger.attach(target, "1.3");
+        await chrome.debugger.sendCommand(target, "Input.dispatchMouseEvent", {
+            type: "mousePressed", x, y, button: "left", clickCount: 1
+        });
+        await chrome.debugger.sendCommand(target, "Input.dispatchMouseEvent", {
+            type: "mouseReleased", x, y, button: "left", clickCount: 1
+        });
         
-        // Simple string match for now
-        for (const [key, val] of Object.entries(memory.domainContexts)) {
-            if (domain.includes(key)) {
-                contextBlock += `[DOMAIN RULE (${key})]:\n${val}\n\n`;
-            }
+        for (const char of value) {
+             await chrome.debugger.sendCommand(target, "Input.dispatchKeyEvent", { type: "keyDown", text: char });
+             await chrome.debugger.sendCommand(target, "Input.dispatchKeyEvent", { type: "keyUp" });
         }
-    }
-
-    if (contextBlock) {
-        await addToQueue("CORTEX_MEMORY", contextBlock);
+    } catch (e) {
+        log(`Debugger type failed on ${tabId}: ${e.message}`);
+    } finally {
+        try { await chrome.debugger.detach(target); } catch(e) { console.error(e); }
     }
 }
 
-async function handleUserPrompt(userText) {
-    // Just queue the user prompt directly. Genesis should be pre-queued by ASSIGN_ROLE.
-    await addToQueue("USER", userText);
+
+// --- 5. Message Routing ---
+
+async function sendMessageToTab(tabId, message) {
+    try {
+        return await chrome.tabs.sendMessage(tabId, message);
+    } catch (e) { return null; }
 }
 
-
-// --- MESSAGING ---
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
-  withLock(async () => {
-    const senderTabId = sender.tab ? sender.tab.id : null;
-    let state = await getState();
+    (async () => {
+        let state = await getState();
+        const tabId = sender.tab ? sender.tab.id : null;
 
-    if (msg.action === "HELLO" && senderTabId) {
-        if (state.agentTabId === senderTabId) {
-            safeSendMessage(senderTabId, { action: "INIT_AGENT" });
-        } else if (state.targetTabIds.includes(senderTabId)) {
-            safeSendMessage(senderTabId, { action: "INIT_TARGET" });
-        }
-        return;
-    }
-
-    if (msg.action === "ASSIGN_ROLE") {
-      const targetId = msg.tabId;
-      if (msg.role === "AGENT") {
-        // Remove from targets if present
-        let newTargets = state.targetTabIds.filter(id => id !== targetId);
-
-        await updateState({
-            agentTabId: targetId,
-            targetTabIds: newTargets,
-            messageQueue: [],
-            isAgentBusy: false,
-            isGenesisComplete: false,
-            pendingGenesisPrompt: null
-        });
-
-        safeSendMessage(targetId, { action: "INIT_AGENT" });
-
-        // Queue Genesis Instructions IMMEDIATELY
-        await queueGenesisInstructions();
-
-      } else {
-        // Add to targets, remove from agent if matching
-        let newAgentId = state.agentTabId === targetId ? null : state.agentTabId;
-        let newTargets = [...state.targetTabIds];
-        if (!newTargets.includes(targetId)) newTargets.push(targetId);
-
-        await updateState({
-            agentTabId: newAgentId,
-            targetTabIds: newTargets
-        });
-
-        safeSendMessage(targetId, { action: "INIT_TARGET" });
-      }
-
-      // Check if both roles are assigned to trigger GENESIS MODE
-      const freshState = await getState();
-      if (freshState.agentTabId && freshState.targetTabIds.length > 0) {
-          console.log("[System] Both roles assigned. Triggering GENESIS MODE.");
-          safeSendMessage(freshState.agentTabId, { action: "GENESIS_MODE_ACTIVE" });
-      }
-
-    }
-
-    if (msg.action === "AGENT_READY") {
-        console.log("[System] Agent signaled [WAITING]. Unlock.");
-        setTimeout(() => {
-            withLock(async () => {
-                await updateState({ isAgentBusy: false });
-                await processQueue();
-            });
-        }, 2000); 
-    }
-
-    if (msg.action === "QUEUE_INPUT") {
-        await handleUserPrompt(msg.payload);
-    }
-
-    if (msg.action === "TARGET_UPDATE") {
-        await chrome.storage.session.set({ lastTargetPayload: msg.payload });
-        // Always queue the target update if we have an agent
-        state = await getState();
-        if (state.agentTabId) {
-            await addToQueue("TARGET", msg.payload.content);
-        }
-    }
-
-    if (msg.action === "AGENT_COMMAND") {
-        // Collect all send promises
-        const sendPromises = state.targetTabIds.map(tId =>
-            safeSendMessage(tId, { action: "EXECUTE_COMMAND", command: msg.payload })
-                .then(success => ({ id: tId, success }))
-        );
-
-        const results = await Promise.all(sendPromises);
-        const failedIds = results.filter(r => !r.success).map(r => r.id);
-
-        if (failedIds.length > 0) {
-            // Re-fetch state inside lock to ensure we don't clobber recent add/removes
-            // But we are already inside withLock, so `state` variable is valid for this transaction?
-            // Actually, we awaited Promise.all, so other events could have queued on the mutex?
-            // No, `withLock` chains promises. The next msg handler won't run until this function finishes.
-            // So `state` is safe? Yes, because we haven't yielded the mutex.
-            // Wait, `await Promise.all` yields execution. Does `withLock` block new executions?
-            // `withLock` chains onto `stateMutex`. The next `withLock` call appends a .then() to the chain.
-            // That .then() callback won't run until the previous one resolves.
-            // So yes, we are exclusive.
-
-            // Just in case, let's use the current state logic:
-            const newTargets = state.targetTabIds.filter(id => !failedIds.includes(id));
-            if (newTargets.length !== state.targetTabIds.length) {
-                 await updateState({ targetTabIds: newTargets });
+        if (msg.action === "HELLO" && tabId) {
+            if (state.agentTabId === tabId) {
+                sendMessageToTab(tabId, { action: "INIT_AGENT" });
+            } else if (state.targetTabs.some(t => t.tabId === tabId)) {
+                sendMessageToTab(tabId, { action: "INIT_TARGET", config: CONFIG });
             }
         }
-    }
 
-    if (msg.action === "DISENGAGE_ALL") {
-        if (state.agentTabId) safeSendMessage(state.agentTabId, { action: "DISENGAGE_LOCAL" });
-        state.targetTabIds.forEach(tId => safeSendMessage(tId, { action: "DISENGAGE_LOCAL" }));
+        if (msg.action === "ASSIGN_ROLE") {
+            const role = msg.role;
+            const tid = msg.tabId;
 
-        // Clear session storage; getState() will return defaults automatically
-        await chrome.storage.session.clear();
-        await chrome.storage.session.remove(Object.keys(DEFAULT_STATE));
-        await updateState(DEFAULT_STATE);
-    }
+            if (role === 'AGENT') {
+                const targets = state.targetTabs.filter(t => t.tabId !== tid);
+                await updateState({
+                    agentTabId: tid,
+                    targetTabs: targets,
+                    commandQueue: [],
+                    elementMap: {},
+                    lastActionTimestamp: 0
+                });
+                sendMessageToTab(tid, { action: "INIT_AGENT" });
 
-    // REMOTE_INJECT support for Popup
-    if (msg.action === "REMOTE_INJECT") {
-         await handleUserPrompt(msg.payload);
-    }
+                const initialPrompt = "You are an autonomous agent. I will feed you the state of another tab. Output commands like `interact` to interact.";
+                await enqueue({ type: 'UPDATE_AGENT', payload: initialPrompt });
 
-
-    // GENESIS_INPUT_CAPTURED - The trigger for starting the loop
-    if (msg.action === "GENESIS_INPUT_CAPTURED") {
-        // Consolidate the Genesis Payload into a SINGLE message
-        state = await getState();
-        let genesisPayload = "";
-
-        // Consume existing queue (System, Memory, Target)
-        state.messageQueue.forEach(item => {
-             if (item.source === "SYSTEM_INIT") genesisPayload += item.content + "\n\n";
-             else genesisPayload += `[${item.source}]\n${item.content}\n\n`;
-        });
-
-        // Add User Prompt
-        genesisPayload += `[USER REQUEST]\n${msg.payload}`;
-
-        // Replace queue with this single mega-message
-        await updateState({
-            messageQueue: [{ source: "GENESIS_MEGA_PAYLOAD", content: genesisPayload, timestamp: Date.now() }],
-            isGenesisComplete: true
-        });
-
-        // Start the machine
-        state = await getState();
-        if (!state.isAgentBusy) {
-            await processQueue();
+            } else {
+                let targets = [...state.targetTabs];
+                if (!targets.some(t => t.tabId === tid)) {
+                    targets.push({ tabId: tid, url: sender.tab?.url || "" });
+                }
+                const agent = state.agentTabId === tid ? null : state.agentTabId;
+                await updateState({ targetTabs: targets, agentTabId: agent });
+                sendMessageToTab(tid, { action: "INIT_TARGET", config: CONFIG });
+            }
         }
-    }
-  });
-  return true;
+
+        if (msg.action === "TARGET_UPDATE") {
+            if (msg.elementIds && Array.isArray(msg.elementIds)) {
+                const newMap = { ...state.elementMap };
+                msg.elementIds.forEach(id => newMap[id] = tabId);
+                await updateState({ elementMap: newMap });
+            }
+            await enqueue({ type: 'UPDATE_AGENT', payload: msg.payload });
+        }
+
+        if (msg.action === "AGENT_COMMAND") {
+            await enqueue({ type: 'CLICK_TARGET', payload: msg.payload });
+        }
+
+        // Handle User Interruption
+        if (msg.action === "USER_INTERRUPT") {
+            log("[System] User Interruption Detected. Clearing Queue.");
+            await updateState({ commandQueue: [], lastActionTimestamp: 0 });
+            await enqueue({ type: 'UPDATE_AGENT', payload: "System: User manually interacted with the page. Queue cleared. Please re-assess state." });
+        }
+
+    })();
+    return true;
 });
+
+async function enqueue(item) {
+    const state = await getState();
+    const q = [...state.commandQueue, item];
+    await updateState({ commandQueue: q });
+}

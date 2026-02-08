@@ -1,0 +1,48 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Welcome to AgentAnything</title>
+    <style>
+        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background: #222; color: #eee; padding: 40px; max-width: 800px; margin: 0 auto; line-height: 1.6; }
+        .container { background: #333; padding: 30px; border-radius: 12px; box-shadow: 0 10px 30px rgba(0,0,0,0.5); }
+        h1 { color: #00ff00; margin-top: 0; }
+        h2 { border-bottom: 1px solid #555; padding-bottom: 10px; }
+        .warning { background: #442a2a; border-left: 5px solid #ff4444; padding: 15px; margin: 20px 0; }
+        .warning h3 { margin-top: 0; color: #ff8888; }
+        button { background: #00ff00; color: #000; border: none; padding: 15px 30px; font-size: 18px; font-weight: bold; border-radius: 6px; cursor: pointer; transition: all 0.2s; margin-top: 20px; }
+        button:hover { background: #00cc00; transform: scale(1.02); }
+        button:disabled { background: #555; color: #888; cursor: not-allowed; transform: none; }
+        .steps { counter-reset: step; }
+        .steps li { list-style: none; margin-bottom: 10px; position: relative; padding-left: 30px; }
+        .steps li:before { counter-increment: step; content: counter(step); position: absolute; left: 0; top: 0; width: 24px; height: 24px; background: #555; border-radius: 50%; text-align: center; line-height: 24px; font-size: 12px; font-weight: bold; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Welcome to AgentAnything V2</h1>
+        <p>You have installed the autonomous browser orchestration layer. Before you begin, you must understand and accept the operational security implications.</p>
+
+        <div class="warning">
+            <h3>⚠️ Privacy & Data Warning</h3>
+            <p><strong>AgentAnything acts as a bridge.</strong> When you assign a tab as a "Target", this extension will:</p>
+            <ul>
+                <li>Scrape the text and interactive elements of that page.</li>
+                <li>Redact detected PII (Emails, Phone Numbers, Credit Cards).</li>
+                <li><strong>Transmit this data</strong> to the "Agent" tab (e.g., ChatGPT, Claude, Gemini).</li>
+            </ul>
+            <p>By proceeding, you acknowledge that page content from Target tabs will be sent to your active AI provider's servers according to their privacy policy. Do not use this tool on tabs containing sensitive personal or financial data that you do not wish to share with the AI.</p>
+        </div>
+
+        <h2>How to Use</h2>
+        <ol class="steps">
+            <li>Open an AI chat (ChatGPT, Claude, etc.) and click the extension icon -> <strong>MAKE AGENT</strong>.</li>
+            <li>Navigate to a website you want to control and click the extension icon -> <strong>MAKE TARGET</strong>.</li>
+            <li>Type a command in the Agent tab (e.g., "Find the latest news").</li>
+            <li>Watch the Agent autonomously control the Target tab.</li>
+        </ol>
+
+        <button id="acceptBtn">I Understand & Enable AgentAnything</button>
+    </div>
+    <script src="welcome.js"></script>
+</body>
+</html>

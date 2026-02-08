@@ -1,77 +1,54 @@
-# AgentAnything
+# AgentAnything V2
 
 > "Turn one tab into the Agent, another tab into its tool."
 
-**AgentAnything** is a Chrome Extension that facilitates the enslavement of one browser tab by another. It transforms a standard browsing session into a master-slave architecture, allowing an AI (running in the **Agent** tab) to programmatically control, read, and manipulate any other website (the **Target** tab) via a generated JSON protocol.
+**AgentAnything** is a Chrome Extension that transforms a standard browsing session into a master-slave architecture, allowing an AI (running in the **Agent** tab) to programmatically control, read, and manipulate any other website (the **Target** tab).
 
-
-## 💀 Features
-
-* **Heuristic Engine:** Traverses the DOM (including Shadow Roots) to score and identify interactive elements based on utility, centrality, and type. It ignores the noise and maps the signal.
-* **Diff Engine:** Minimizes token usage by caching the Target's state and only transmitting *deltas* (appends or replacements) to the Agent. Bandwidth is finite; silence is efficient.
-* **Dual-Layer Command Injection:**
-    * **DOM Level:** Click, Type, Read.
-    * **Browser Level:** Refresh, Back, Forward, Find (Text Search & Scroll).
-* **Universal Compatibility:** Works on any target URL. If it renders HTML, it can be controlled.
+**Version 2.0 Feature Set:**
+*   **Agent Bridge**: Robustly injects prompts into ChatGPT, Claude, and Gemini using advanced framework bypass techniques (React/ProseMirror support).
+*   **Semantic Parser**: Distills complex web pages into a compressed XML/Markdown schema, saving tokens while preserving context.
+*   **Secure Execution**: Uses the Chrome Debugger API to execute clicks and keystrokes in background tabs without stealing focus.
+*   **Privacy First**: Automatically redacts PII (emails, phone numbers, credit cards) before sending data to the AI.
+*   **Multi-Tab Control**: Can manage multiple target tabs simultaneously.
 
 ## 📂 File Structure
 
-* `manifest.json`: The entry point. Permissions: `scripting`, `tabs`, `storage`.
-* `background.js`: The central nervous system. Routes messages between the isolated worlds of the Agent and the Target. State is persisted in `chrome.storage.session` to survive Service Worker suspensions, protected by a mutex.
-* `content.js`: The enforcer. Injects logic into the page, executes commands, and reports state.
-* `heuristics.js`: The brain. Analyzes the DOM to generate a semantic map of the Target.
-* `popup.html` / `popup.js`: The interface for assigning roles.
+* `manifest.json`: Manifest V3 configuration.
+* `background.js`: Store-First Service Worker. Manages state, queues commands, and enforces privacy policies.
+* `content/`:
+    * `agent_bridge.js`: Injects prompts and parses AI responses.
+    * `target_adapter.js`: Scrapes DOM, redacts PII, and detects user interruptions.
+    * `agent_dashboard.js`: Visual status panel.
+* `welcome.html`: Privacy onboarding flow.
+* `options.html`: Configuration settings.
 
 ## 🔧 Installation (Sideload)
 
-Since this tool effectively turns your browser into a botnet node, it is not on the Web Store.
-
-1.  Clone or download this repository.
+1.  Clone this repository.
 2.  Open Chrome and navigate to `chrome://extensions`.
 3.  Enable **Developer mode** (top right toggle).
 4.  Click **Load unpacked**.
 5.  Select the `AgentAnything` directory.
+6.  **Important**: You must complete the Privacy Onboarding that opens automatically to enable the extension.
 
-## 🕹️ Usage Protocol
+## 🕹️ Usage
 
-### Phase 1: The Tool (Target)
-1.  Navigate to the website you wish to control (e.g., a documentation site, a search engine, another AI).
-2.  Click the **AgentAnything** extension icon.
-3.  Select **MAKE TARGET**.
-    * *Status:* The tab is now listening. It will snapshot its DOM and wait for orders.
+1.  **Assign Agent**: Open your AI (ChatGPT/Claude), click extension -> **MAKE AGENT**.
+2.  **Assign Target**: Open a website, click extension -> **MAKE TARGET**.
+3.  **Command**: In the Agent tab, type a command (e.g., "Find the cheapest flight to Tokyo").
+4.  **Observe**: The Agent will autonomously browse the target tab.
 
-### Phase 2: The Master (Agent)
-1.  Open your LLM of choice (ChatGPT, Claude, Gemini, DeepSeek) in a new tab.
-2.  Click the **AgentAnything** extension icon.
-3.  Select **MAKE AGENT**.
-    * *Status:* The extension queues the System Instructions and Target Map. Input fields on the page will highlight green to indicate they are ready for capture.
-4.  Type your command into the AI chat (e.g., *"Search for 'glitch art' and open the first result"*).
-5.  Press **Enter** or click **Send**.
-    * *Action:* The extension intercepts your prompt, locks the UI (scrolling only), and injects the queued context (System + Target + Your Prompt) into the AI.
+## ⚠️ Privacy Warning
 
-### Phase 3: The Loop
-1.  The AI receives the context and your command.
-2.  The AI outputs a JSON command block.
-3.  **AgentAnything** parses the block and transmits it to the Target.
-4.  The Target executes the action and returns a Diff of the page changes.
-5.  The new state is injected into the Agent's Observation Deck.
-6.  Repeat until the task is complete or the browser crashes under the weight of its own existence.
+This tool transmits page content from your "Target" tabs to the "Agent" tab (your active AI provider session). While PII is redacted locally, you are responsible for the data you choose to share with the AI.
 
 ## 🧪 Development
 
-### Running Tests
-To verify the core logic (state persistence, mutexes, deadlock recovery), run:
-
+Run tests:
 ```bash
 node tests/background_test.js
 ```
 
-## ⚠️ Known Limitations & quirks
-
-* **Hallucinations:** If the AI outputs invalid JSON, the extension will log an error to the console. You must manually chastise the AI to correct its syntax.
-* **iframe / CORS:** Deeply nested cross-origin iframes are difficult to penetrate without compromising browser security settings. The Heuristic Engine attempts to pierce Shadow DOMs but respects cross-origin boundaries.
-* **Deadlocks:** If the Agent hangs for more than 3 minutes, the extension will auto-unlock to prevent indefinite freezing.
-
 ## 📜 License
 
-MIT. Do what you want. I am not responsible for what you break.
+MIT.
