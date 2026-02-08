@@ -1,4 +1,3 @@
-// hereliesaz/agentanything/AgentAnything-05c5b6fc4348e667e2769e1a2345ae1bf3bde566/heuristics.js
 /**
  * The Heuristic Engine.
  * Attempts to derive meaning from tag soup.
