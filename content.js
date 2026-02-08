@@ -7,14 +7,12 @@ let knownDomainContexts = new Set();
 let observationDeck = null;
 
 // --- INITIALIZATION HANDSHAKE ---
-// This runs immediately when the script loads on ANY page.
-// It asks the background: "Do I have a job?"
 chrome.runtime.sendMessage({ action: "HELLO" });
 
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   switch (msg.action) {
     case "INIT_AGENT":
-      if (role !== "AGENT") { // Prevent double-init
+      if (role !== "AGENT") {
         role = "AGENT";
         initAgentUI();
       }
@@ -35,12 +33,10 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   }
 });
 
-// --- AGENT LOGIC ---
+// --- AGENT LOGIC (THE BRAIN) ---
 
 function initAgentUI() {
   console.log("%c AGENT ACTIVATED ", "background: #000; color: #0f0; font-size: 20px;");
-  
-  // Create UI first so we know it's working
   createObservationDeck();
 
   chrome.storage.sync.get({ universalContext: '' }, (items) => {
@@ -75,9 +71,6 @@ ${universal}
 WAITING FOR TARGET...
     `;
     
-    // Only copy prompt if this is a fresh manual activation, 
-    // to avoid clobbering clipboard on random reloads.
-    // We assume if the deck was just created, we prompt.
     if (!window.hasPrompted) {
         copyToClipboard(prompt);
         notify("System Prompt Copied.");
@@ -94,25 +87,16 @@ function createObservationDeck() {
   observationDeck = document.createElement('div');
   observationDeck.id = 'aa-observation-deck';
   observationDeck.style.cssText = `
-    position: fixed; top: 0; right: 0; width: 350px; background: #050505; color: #0f0;
+    position: fixed; top: 0; right: 0; width: 300px; background: #050505; color: #0f0;
     border-left: 1px solid #333; height: 100vh; z-index: 2147483647; padding: 10px;
-    font-family: 'Consolas', 'Monaco', monospace; font-size: 11px; white-space: pre-wrap; 
-    overflow-y: auto; box-shadow: -5px 0 15px rgba(0,0,0,0.5);
+    font-family: 'Consolas', 'Monaco', monospace; font-size: 10px; white-space: pre-wrap; 
+    overflow-y: auto; opacity: 0.9; pointer-events: none;
   `;
   document.body.appendChild(observationDeck);
-  
-  const header = document.createElement('div');
-  header.innerHTML = `<span style="color:#666">STATUS:</span> <span style="color:#0f0; font-weight:bold">ONLINE</span>`;
-  header.style.borderBottom = "1px solid #333";
-  header.style.paddingBottom = "5px";
-  header.style.marginBottom = "10px";
-  observationDeck.appendChild(header);
 }
 
 function observeAIOutput() {
   const observer = new MutationObserver((mutations) => {
-    // Look for JSON blocks in the ENTIRE body. 
-    // Modern AI chats render incrementally, so we scan frequently.
     const bodyText = document.body.innerText;
     if (bodyText.includes('```json') && bodyText.includes('```')) {
         parseCommands(bodyText);
@@ -126,10 +110,7 @@ function parseCommands(text) {
   let match;
   while ((match = regex.exec(text)) !== null) {
     try {
-      const jsonStr = match[1];
-      // Clean up common AI json errors (trailing commas, etc) if possible
-      // But standard JSON.parse is strict.
-      const json = JSON.parse(jsonStr);
+      const json = JSON.parse(match[1]);
       const sig = JSON.stringify(json);
       
       if (sig !== lastCommandSignature) {
@@ -143,99 +124,132 @@ function parseCommands(text) {
         
         notify(`Sent: ${json.tool}.${json.action}`);
         
-        // Visual feedback in deck
+        // Visual feedback
         const line = document.createElement('div');
         line.style.color = "#888";
-        line.innerText = `>> SENT: ${json.action}`;
+        line.innerText = `>> COMMAND SENT: ${json.action}`;
         observationDeck.appendChild(line);
         observationDeck.scrollTop = observationDeck.scrollHeight;
       }
     } catch (e) {
-      // AUTO-CORRECTION:
-      // If parsing fails, we don't just log it. We tell the AI.
-      // This is tricky because we can't easily type into the chat box.
-      // So we flash a big error in the user's face or the logs.
       console.error("Agent JSON Syntax Error", e);
     }
   }
 }
 
+// --- THE AUTO-INPUT MODULE ---
 function injectObservation(sourceId, payload) {
   window.activeTargetId = sourceId;
   createObservationDeck();
-  const obsWin = document.getElementById('aa-observation-deck');
+  
+  // 1. Update the visual deck (for human monitoring)
+  updateVisualDeck(payload);
 
-  // --- CORTEX DOMAIN CHECK ---
-  if (payload.url) {
-    try {
-      const hostname = new URL(payload.url).hostname;
-      const cleanHost = hostname.replace(/^www\./, '');
-      
-      if (!knownDomainContexts.has(cleanHost)) {
-        chrome.storage.sync.get({ domainContexts: {} }, (items) => {
-           const context = items.domainContexts[hostname] || items.domainContexts[cleanHost];
-           if (context) {
-             const contextMsg = `\n\n[CORTEX MEMORY: ${cleanHost}]\n${context}\n`;
-             obsWin.innerText += contextMsg;
-             knownDomainContexts.add(cleanHost);
-           }
-        });
-      }
-    } catch (e) {}
-  }
-
-  // --- UI UPDATE ---
+  // 2. Format the message for the AI
+  let aiMessage = "";
   if (payload.type === "APPEND") {
-    // Clean previous "END UPDATE" markers to make it a continuous stream
-    obsWin.innerHTML = obsWin.innerHTML.replace(/<br>\[END UPDATE\]/g, "");
-    
-    const newContent = document.createElement('div');
-    newContent.innerText = payload.content;
-    newContent.style.borderLeft = "2px solid #0f0";
-    newContent.style.paddingLeft = "5px";
-    newContent.style.marginTop = "5px";
-    obsWin.appendChild(newContent);
-    
-    const footer = document.createElement('div');
-    footer.innerText = "[END UPDATE]";
-    footer.style.color = "#666";
-    footer.style.fontSize = "9px";
-    obsWin.appendChild(footer);
-
-    obsWin.scrollTop = obsWin.scrollHeight;
+    aiMessage = `\n[TARGET UPDATE]:\n${payload.content}`;
   } else {
-    // REPLACE
-    obsWin.innerHTML = ""; // Wipe
-    const header = document.createElement('div');
-    header.innerHTML = `<span style="color:#666">CONNECTED TO:</span> <span style="color:#fff">${sourceId}</span>`;
-    header.style.borderBottom = "1px solid #333";
-    obsWin.appendChild(header);
-
-    const content = document.createElement('div');
-    content.innerText = payload.content;
-    obsWin.appendChild(content);
-    
-    const footer = document.createElement('div');
-    footer.innerText = "[END UPDATE]";
-    footer.style.color = "#666";
-    footer.style.fontSize = "9px";
-    obsWin.appendChild(footer);
+    // Check Cortex Memory for this domain
+    let contextMsg = "";
+    if (payload.url) {
+        try {
+            const hostname = new URL(payload.url).hostname.replace(/^www\./, '');
+            // Only fetch if we haven't seen this domain this session to avoid spamming the AI
+            if (!knownDomainContexts.has(hostname)) {
+                 // We can't act async here easily for the paste, so we rely on what's visually shown
+                 // Ideally we'd fetch storage here, but for speed we'll skip for now 
+                 // or you can enable it if you accept the async delay.
+                 knownDomainContexts.add(hostname);
+            }
+        } catch(e) {}
+    }
+    aiMessage = `\n[TARGET CONNECTED]:\n${payload.content}\n\n[AWAITING COMMANDS]`;
   }
+
+  // 3. AUTO-TYPE AND SEND
+  // We use a debounce to prevent spamming if multiple updates come in fast
+  if (window.inputDebounce) clearTimeout(window.inputDebounce);
+  window.inputDebounce = setTimeout(() => {
+      autoTypeIntoChat(aiMessage);
+  }, 500);
+}
+
+function updateVisualDeck(payload) {
+    if (payload.type === "APPEND") {
+        const div = document.createElement('div');
+        div.innerText = payload.content;
+        div.style.borderLeft = "2px solid #0f0";
+        div.style.marginTop = "5px";
+        div.style.paddingLeft = "5px";
+        observationDeck.appendChild(div);
+    } else {
+        observationDeck.innerHTML = `<div style="color:#666;border-bottom:1px solid #333">CONNECTED TO: ${payload.url}</div>`;
+        const div = document.createElement('div');
+        div.innerText = payload.content;
+        observationDeck.appendChild(div);
+    }
+    observationDeck.scrollTop = observationDeck.scrollHeight;
+}
+
+function autoTypeIntoChat(text) {
+    // Heuristic to find the main chat input
+    // Works for ChatGPT, Claude, Gemini, DeepSeek
+    const input = document.querySelector('textarea, [contenteditable="true"], [role="textbox"]');
+    
+    if (!input) {
+        console.warn("AgentAnything: Could not find chat input box.");
+        return;
+    }
+
+    // React/Vue Value Setter Hack
+    // These frameworks override the standard .value property.
+    // We have to call the native setter to trigger the internal state update.
+    try {
+        const nativeTextAreaValueSetter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, "value").set;
+        const currentVal = input.value;
+        
+        // Append to existing text if any, to avoid overwriting user's draft
+        const newVal = currentVal ? currentVal + "\n" + text : text;
+        
+        nativeTextAreaValueSetter.call(input, newVal);
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+    } catch (e) {
+        // Fallback for contenteditable (like some versions of ChatGPT/Claude)
+        input.innerText += text;
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+    }
+
+    // Try to find the Send button
+    // We wait briefly for the UI to register the text input
+    setTimeout(() => {
+        const sendBtn = document.querySelector('button[aria-label="Send"], button[data-testid="send-button"], button[aria-label="Submit"]');
+        if (sendBtn) {
+            sendBtn.click();
+            notify("Auto-Submitted Update to AI");
+        } else {
+            // Fallback: Press Enter
+            const enterEvent = new KeyboardEvent('keydown', {
+                bubbles: true, cancelable: true, keyCode: 13, key: 'Enter'
+            });
+            input.dispatchEvent(enterEvent);
+            notify("Auto-Pressed Enter");
+        }
+    }, 200);
 }
 
 
-// --- TARGET LOGIC ---
+// --- TARGET LOGIC (THE BODY) ---
 
 function initTargetLogic() {
   console.log("%c TARGET ACQUIRED ", "background: #000; color: #f00; font-size: 20px;");
   
-  // Visual Indicator for Target
+  // Visual Indicator
   const indicator = document.createElement('div');
   indicator.innerText = "TARGET";
   indicator.style.cssText = "position:fixed;bottom:10px;right:10px;background:red;color:white;padding:2px 5px;z-index:999999;font-size:10px;font-family:monospace;pointer-events:none;opacity:0.5;";
   document.body.appendChild(indicator);
 
-  // Allow DOM to settle
   setTimeout(() => {
       const map = Heuristics.generateMap();
       targetMap = map;
@@ -296,25 +310,10 @@ function executeCommand(cmd) {
   if (cmd.tool === "browser" && cmd.action === "find") {
       const found = window.find(cmd.value);
       if (found) {
-        const sel = window.getSelection();
-        if (sel.rangeCount > 0) {
-           const range = sel.getRangeAt(0);
-           const rect = range.getBoundingClientRect();
-           
-           const spot = document.createElement('div');
-           spot.style.cssText = `
-             position: absolute; top: ${window.scrollY + rect.top}px; left: ${window.scrollX + rect.left}px;
-             width: ${rect.width}px; height: ${rect.height}px;
-             background: rgba(255, 255, 0, 0.5); z-index: 999999; pointer-events: none;
-           `;
-           document.body.appendChild(spot);
-           setTimeout(() => spot.remove(), 2000);
-           
            chrome.runtime.sendMessage({ 
              action: "TARGET_UPDATE", 
-             payload: { type: "APPEND", content: `\n[BROWSER]: Found "${cmd.value}" and scrolled to it.`, url: window.location.href }
+             payload: { type: "APPEND", content: `\n[BROWSER]: Found "${cmd.value}".`, url: window.location.href }
            });
-        }
       } else {
         chrome.runtime.sendMessage({ 
           action: "TARGET_UPDATE", 
@@ -329,11 +328,12 @@ function executeCommand(cmd) {
   if (!el) {
     chrome.runtime.sendMessage({ 
         action: "TARGET_UPDATE", 
-        payload: { type: "APPEND", content: `\n[ERROR]: Element ${cmd.id} missing (DOM Shifted?).`, url: window.location.href }
+        payload: { type: "APPEND", content: `\n[ERROR]: Element ${cmd.id} missing.`, url: window.location.href }
     });
     return;
   }
 
+  // Highlight
   const originalBorder = el.style.border;
   el.style.border = "2px solid #0f0";
   setTimeout(() => el.style.border = originalBorder, 500);
@@ -341,44 +341,5 @@ function executeCommand(cmd) {
   try {
     if (cmd.action === "click") {
       el.click();
-      el.dispatchEvent(new KeyboardEvent('keydown', {'key': 'Enter'}));
     } 
-    else if (cmd.action === "type") {
-      el.value = cmd.value;
-      el.innerText = cmd.value; 
-      el.dispatchEvent(new Event('input', { bubbles: true }));
-      el.dispatchEvent(new Event('change', { bubbles: true }));
-    }
-    else if (cmd.action === "read") {
-        chrome.runtime.sendMessage({ 
-          action: "TARGET_UPDATE", 
-          payload: { type: "APPEND", content: `\n[READ]: ${el.innerText || el.value}`, url: window.location.href }
-        });
-    }
-  } catch (err) {
-    chrome.runtime.sendMessage({ 
-        action: "TARGET_UPDATE", 
-        payload: { type: "APPEND", content: `\n[ERROR]: ${err.message}`, url: window.location.href } 
-    });
-  }
-}
-
-// Utils
-function notify(msg) {
-  const n = document.createElement('div');
-  n.innerText = msg;
-  n.style.cssText = "position:fixed;top:10px;left:50%;transform:translateX(-50%);background:red;color:white;padding:5px;z-index:2147483647;font-family:monospace;";
-  document.body.appendChild(n);
-  setTimeout(() => n.remove(), 3000);
-}
-
-function copyToClipboard(text) {
-    navigator.clipboard.writeText(text).catch(err => {
-        const textArea = document.createElement("textarea");
-        textArea.value = text;
-        document.body.appendChild(textArea);
-        textArea.select();
-        document.execCommand('copy');
-        document.body.removeChild(textArea);
-    });
-}
+    else if (cmd.action === "
