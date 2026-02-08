@@ -1,7 +1,7 @@
 /**
  * Heuristics Engine (Type-6 Hardened)
  * Traverses deep Shadow DOM trees to locate interactive elements.
- * Prioritizes visibility and centrality.
+ * Shared utility for both Agent and Target roles.
  */
 const Heuristics = {
   
@@ -13,24 +13,18 @@ const Heuristics = {
     visibility: 5
   },
 
-  /**
-   * Recursively gathers all elements, piercing Shadow Roots.
-   */
   getAllElements: function(root = document.body) {
     let elements = [];
     if (!root) return elements;
 
-    // Add current if it's an element
     if (root.nodeType === Node.ELEMENT_NODE) {
         elements.push(root);
     }
     
-    // Traverse Shadow Root
     if (root.shadowRoot) {
       elements = elements.concat(this.getAllElements(root.shadowRoot));
     }
     
-    // Traverse Children
     if (root.children) {
       for (let child of root.children) {
         elements = elements.concat(this.getAllElements(child));
@@ -40,12 +34,12 @@ const Heuristics = {
   },
 
   getElementByAAId: function(id) {
+    // Brute force find across all shadow roots
     const all = this.getAllElements(document.body);
     return all.find(el => el.dataset.aaId === id) || null;
   },
 
   findBestInput: function() {
-    // 1. Check for standard active element first
     if (document.activeElement && 
        (document.activeElement.tagName === 'INPUT' || 
         document.activeElement.tagName === 'TEXTAREA' || 
@@ -54,11 +48,9 @@ const Heuristics = {
     }
 
     const all = this.getAllElements(document.body);
-    
-    // 2. Filter for valid inputs
     const deepCandidates = all.filter(el => {
-        // Must be visible
-        if (el.offsetParent === null && window.getComputedStyle(el).display === 'none') return false; 
+        const style = window.getComputedStyle(el);
+        if (style.display === 'none' || style.visibility === 'hidden') return false; 
         
         const tag = el.tagName;
         const role = el.getAttribute('role');
@@ -70,7 +62,7 @@ const Heuristics = {
                role === 'textbox';
     });
     
-    // 3. Sort by size (heuristic: main chat inputs are usually large or wide)
+    // Sort by size (Chat inputs are usually the largest text area on screen)
     deepCandidates.sort((a, b) => {
         const rectA = a.getBoundingClientRect();
         const rectB = b.getBoundingClientRect();
@@ -83,99 +75,53 @@ const Heuristics = {
   findSendButton: function() {
     const all = this.getAllElements(document.body);
     return all.find(el => {
-        // Must be visible
         const style = window.getComputedStyle(el);
         if (style.display === 'none' || style.visibility === 'hidden') return false;
+        
         const rect = el.getBoundingClientRect();
-        if (rect.width < 5 || rect.height < 5) return false;
+        if (rect.width < 10 || rect.height < 10) return false; // Too small
 
-        // Semantic checks
-        if (el.tagName !== 'BUTTON' && el.getAttribute('role') !== 'button') return false;
-        if (el.disabled) return false;
-        
-        const html = (el.outerHTML || "").toLowerCase();
-        const label = (el.getAttribute('aria-label') || "").toLowerCase();
+        const txt = (el.innerText || "").toLowerCase();
+        const aria = (el.getAttribute('aria-label') || "").toLowerCase();
         const testId = (el.getAttribute('data-testid') || "").toLowerCase();
-        const text = (el.innerText || "").toLowerCase();
-        
-        return label.includes('send') || 
-               label.includes('submit') || 
-               testId.includes('send') ||
-               testId.includes('submit') ||
-               html.includes('path d="') ||  // SVG icons often indicate send buttons
-               text === 'send' ||
-               text === 'submit' ||
-               text === 'go';
+
+        const isButton = el.tagName === 'BUTTON' || 
+                         el.getAttribute('role') === 'button' || 
+                         el.type === 'submit';
+                         
+        const isSendy = txt.includes('send') || aria.includes('send') || testId.includes('send') ||
+                        txt.includes('submit') || el.querySelector('svg');
+
+        return isButton && isSendy;
     });
-  },
-
-  scoreElement: function(el) {
-    let score = 0;
-    const rect = el.getBoundingClientRect();
-    
-    if (rect.width === 0 || rect.height === 0 || window.getComputedStyle(el).display === 'none') {
-      return -9999;
-    }
-
-    // Distance from center
-    const centerX = window.innerWidth / 2;
-    const centerY = window.innerHeight / 2;
-    const elCenterX = rect.left + rect.width / 2;
-    const elCenterY = rect.top + rect.height / 2;
-    const dist = Math.sqrt(Math.pow(centerX - elCenterX, 2) + Math.pow(centerY - elCenterY, 2));
-    score -= dist * 0.01;
-
-    if (el.tagName === 'INPUT') {
-      const type = el.getAttribute('type') || 'text';
-      if (['text', 'search', 'email', 'url'].includes(type)) score += 20;
-      if (type === 'password') score -= 100;
-    }
-    if (el.tagName === 'TEXTAREA') score += 25;
-    if (el.tagName === 'BUTTON' || el.getAttribute('role') === 'button') {
-      score += 10;
-      const t = (el.innerText || "").toLowerCase();
-      if (t.match(/search|send|submit|go|chat/i)) score += 15;
-    }
-
-    if (rect.width > 20 && rect.height > 20) score += 5;
-
-    return score;
   },
 
   generateMap: function() {
+    // Generate a map of interactive elements for the Agent to click
     const all = this.getAllElements();
-    const map = [];
-    
-    all.forEach((el, idx) => {
-      const score = this.scoreElement(el);
-      if (score > 5) {
+    return all.filter(el => {
+        const rect = el.getBoundingClientRect();
+        if (rect.width < 10 || rect.height < 10) return false;
+        
+        const tag = el.tagName;
+        if (tag === 'BUTTON' || tag === 'A' || tag === 'INPUT' || tag === 'TEXTAREA') return true;
+        if (el.getAttribute('role') === 'button') return true;
+        return false;
+    }).slice(0, 20).map(el => { // Limit to top 20 to save tokens
         if (!el.dataset.aaId) {
-          el.dataset.aaId = `aa-${Math.random().toString(36).substr(2, 9)}`;
+          el.dataset.aaId = `aa-${Math.random().toString(36).substr(2, 5)}`;
         }
-
-        map.push({
+        return {
           id: el.dataset.aaId,
           tag: el.tagName.toLowerCase(),
-          type: el.type || null,
-          text: (el.innerText || el.placeholder || el.value || "").substring(0, 30).trim(),
-          score: score,
-          element: el
-        });
-      }
+          text: (el.innerText || el.value || "").substring(0, 20).replace(/\n/g, ' ')
+        };
     });
-
-    return map.sort((a, b) => b.score - a.score).slice(0, 20);
   },
 
   findMainContent: function() {
     let candidates = Array.from(document.querySelectorAll('div, main, article, section'));
-    
-    candidates.sort((a, b) => {
-      const areaA = a.offsetWidth * a.offsetHeight;
-      const areaB = b.offsetWidth * b.offsetHeight;
-      return areaB - areaA;
-    });
-
-    return candidates.find(c => c !== document.body && c.innerText.length > 50) || document.body;
+    candidates.sort((a, b) => (b.offsetWidth * b.offsetHeight) - (a.offsetWidth * a.offsetHeight));
+    return candidates[0] || document.body;
   }
 };
