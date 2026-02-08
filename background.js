@@ -5,6 +5,7 @@ const DEFAULT_STATE = {
     targetTabIds: [], // Array for storage compatibility
     messageQueue: [],
     isAgentBusy: false,
+    busySince: 0,
     isGenesisComplete: false,
     pendingGenesisPrompt: null
 };
@@ -75,10 +76,22 @@ async function addToQueue(source, content, forceImmediate = false) {
 
 async function processQueue() {
     const state = await getState();
-    if (state.isAgentBusy || !state.agentTabId || state.messageQueue.length === 0) return;
+
+    // Check for deadlock timeout (3 minutes)
+    if (state.isAgentBusy) {
+        if (Date.now() - (state.busySince || 0) > 180000) {
+            console.warn("[System] Agent deadlock detected. Forcing unlock.");
+            await updateState({ isAgentBusy: false, busySince: 0 });
+            // Continue processing
+        } else {
+            return;
+        }
+    }
+
+    if (!state.agentTabId || state.messageQueue.length === 0) return;
 
     // Lock
-    await updateState({ isAgentBusy: true });
+    await updateState({ isAgentBusy: true, busySince: Date.now() });
 
     // Get item
     // We must fetch state again? No, we just locked it. But messageQueue might have changed?
@@ -89,7 +102,7 @@ async function processQueue() {
     // Actually, let's just use the state we have, but we need to pop the item.
     let currentQueue = [...state.messageQueue];
     if (currentQueue.length === 0) {
-        await updateState({ isAgentBusy: false });
+        await updateState({ isAgentBusy: false, busySince: 0 });
         return;
     }
 
@@ -118,7 +131,7 @@ ${item.content}
         payload: finalPayload 
     }).catch(async (err) => {
         console.warn("Agent unreachable");
-        await updateState({ isAgentBusy: false });
+        await updateState({ isAgentBusy: false, busySince: 0 });
     });
 }
 
