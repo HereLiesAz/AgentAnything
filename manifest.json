@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "AgentAnything",
-  "version": "0.5.1",
-  "description": "Remote Control for AI Agents. Monolithic Core.",
+  "version": "0.6.0",
+  "description": "Remote Control for AI Agents. Queue-Based Architecture.",
   "permissions": [
     "activeTab",
     "scripting",
@@ -31,7 +31,7 @@
   "content_scripts": [
     {
       "matches": ["<all_urls>"],
-      "js": ["content.js"],
+      "js": ["heuristics.js", "content.js"],
       "run_at": "document_start"
     }
   ]
