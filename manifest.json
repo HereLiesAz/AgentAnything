@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "AgentAnything",
-  "version": "0.9.0",
-  "description": "Remote Control. Genesis Sequence Architecture.",
+  "version": "0.9.1",
+  "description": "Remote Control. Options & Eject Fixed.",
   "permissions": [
     "activeTab",
     "scripting",
@@ -23,6 +23,7 @@
       "128": "icons/icon128.png"
     }
   },
+  "options_page": "options.html",
   "icons": {
       "16": "icons/icon16.png",
       "48": "icons/icon48.png",
