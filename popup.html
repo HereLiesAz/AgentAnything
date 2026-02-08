@@ -15,6 +15,9 @@
     
     .btn-done { background: #2e3440; color: #a3be8c; border: 1px solid #a3be8c; cursor: default; }
     
+    .btn-opt { background: #2e3440; color: #d8dee9; border: 1px solid #4c566a; }
+    .btn-opt:hover { background: #3b4252; color: #fff; }
+
     @keyframes pulse-border {
       0% { box-shadow: 0 0 0 0 rgba(191, 97, 106, 0.7); }
       70% { box-shadow: 0 0 0 6px rgba(191, 97, 106, 0); }
@@ -43,12 +46,16 @@
   <div id="view-setup">
     <h2>Configuration</h2>
     <div class="info">
-      <strong>Step 1:</strong> Go to AI Chat tab &#8594; Assign Agent<br>
-      <strong>Step 2:</strong> Go to Tool tab &#8594; Assign Target
+      <strong>Step 1:</strong> Assign Agent (LLM Tab)<br>
+      <strong>Step 2:</strong> Assign Target (Tool Tab)
     </div>
     
     <button id="btn-agent" class="btn btn-agent">ASSIGN: AGENT</button>
     <button id="btn-target" class="btn btn-target">ASSIGN: TARGET</button>
+    
+    <div style="margin-top: 15px; border-top: 1px solid #333; padding-top: 10px;">
+        <button id="btn-options" class="btn btn-opt">CONTEXT MEMORY</button>
+    </div>
     
     <div style="text-align: center;">
       <button id="btn-reset-setup" class="btn-reset">Reset Configuration</button>
@@ -62,7 +69,10 @@
     <textarea id="remote-input" placeholder="Interject command (e.g., 'Stop and summarize')..."></textarea>
     <button id="btn-inject" class="btn btn-send">SEND COMMAND</button>
 
-    <button id="btn-kill" class="btn btn-kill">DISENGAGE ALL</button>
+    <div style="margin-top: 10px; display: flex; gap: 5px;">
+        <button id="btn-options-active" class="btn btn-opt" style="flex:1;">MEMORY</button>
+        <button id="btn-kill" class="btn btn-kill" style="flex:1; margin-top:0;">DISENGAGE</button>
+    </div>
   </div>
 
   <script src="popup.js"></script>
