@@ -127,6 +127,25 @@ function initAgent() {
     setStatus("AGENT: ASSIGNED", "blue");
     const Heuristics = window.AA_Heuristics;
 
+    // Highlight inputs immediately
+    document.addEventListener('mouseover', (e) => {
+        if (isWaitingForGenesisInput) {
+            const el = e.target;
+            if (['INPUT', 'TEXTAREA'].includes(el.tagName) || el.isContentEditable) {
+                el.style.outline = "2px dashed #00ff00";
+            }
+        }
+    }, true);
+
+    document.addEventListener('mouseout', (e) => {
+        if (isWaitingForGenesisInput) {
+            const el = e.target;
+            if (['INPUT', 'TEXTAREA'].includes(el.tagName) || el.isContentEditable) {
+                el.style.outline = "";
+            }
+        }
+    }, true);
+
     window.addEventListener('focus', (e) => {
         if (['INPUT','TEXTAREA'].includes(e.target.tagName) || e.target.isContentEditable) {
             activeInput = e.target;
