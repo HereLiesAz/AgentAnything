@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "AgentAnything",
-  "version": "0.9.1",
-  "description": "Remote Control. Options & Eject Fixed.",
+  "version": "0.9.2",
+  "description": "Remote Control. Trap Fixed.",
   "permissions": [
     "activeTab",
     "scripting",
