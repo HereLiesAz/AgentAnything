@@ -281,10 +281,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         if (state.agentTabId) chrome.tabs.sendMessage(state.agentTabId, { action: "DISENGAGE_LOCAL" }).catch(() => {});
         state.targetTabIds.forEach(tId => chrome.tabs.sendMessage(tId, { action: "DISENGAGE_LOCAL" }).catch(() => {}));
 
-        await updateState(DEFAULT_STATE);
         await chrome.storage.session.clear();
-        await chrome.storage.session.remove(Object.keys(DEFAULT_STATE));
-        await updateState(DEFAULT_STATE);
     }
 
     // REMOTE_INJECT support for Popup
