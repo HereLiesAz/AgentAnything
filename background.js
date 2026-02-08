@@ -90,24 +90,15 @@ async function processQueue() {
 
     if (!state.agentTabId || state.messageQueue.length === 0) return;
 
-    // Lock
-    await updateState({ isAgentBusy: true, busySince: Date.now() });
-
-    // Get item
-    // We must fetch state again? No, we just locked it. But messageQueue might have changed?
-    // In single threaded JS, if we didn't await between read and lock, we are fine.
-    // But we did await updateState.
-    // Let's rely on the state we read, but verify queue length.
-
-    // Actually, let's just use the state we have, but we need to pop the item.
+    // Atomic: Lock AND Dequeue
     let currentQueue = [...state.messageQueue];
-    if (currentQueue.length === 0) {
-        await updateState({ isAgentBusy: false, busySince: 0 });
-        return;
-    }
-
     const item = currentQueue.shift();
-    await updateState({ messageQueue: currentQueue });
+
+    await updateState({
+        isAgentBusy: true,
+        busySince: Date.now(),
+        messageQueue: currentQueue
+    });
     
     let finalPayload = "";
     if (item.source === "SYSTEM_INIT") {
@@ -262,18 +253,32 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     }
 
     if (msg.action === "AGENT_COMMAND") {
-        const promises = state.targetTabIds.map(tId =>
+        // Collect all send promises
+        const sendPromises = state.targetTabIds.map(tId =>
             chrome.tabs.sendMessage(tId, { action: "EXECUTE_COMMAND", command: msg.payload })
-                .then(() => ({ tId, status: 'success' }))
-                .catch(() => ({ tId, status: 'failed' }))
+                .then(() => ({ id: tId, success: true }))
+                .catch(() => ({ id: tId, success: false }))
         );
-        const results = await Promise.all(promises);
-        const failedIds = results.filter(r => r.status === 'failed').map(r => r.tId);
+
+        const results = await Promise.all(sendPromises);
+        const failedIds = results.filter(r => !r.success).map(r => r.id);
 
         if (failedIds.length > 0) {
-            const freshState = await getState();
-            const newTargets = freshState.targetTabIds.filter(id => !failedIds.includes(id));
-            await updateState({ targetTabIds: newTargets });
+            // Re-fetch state inside lock to ensure we don't clobber recent add/removes
+            // But we are already inside withLock, so `state` variable is valid for this transaction?
+            // Actually, we awaited Promise.all, so other events could have queued on the mutex?
+            // No, `withLock` chains promises. The next msg handler won't run until this function finishes.
+            // So `state` is safe? Yes, because we haven't yielded the mutex.
+            // Wait, `await Promise.all` yields execution. Does `withLock` block new executions?
+            // `withLock` chains onto `stateMutex`. The next `withLock` call appends a .then() to the chain.
+            // That .then() callback won't run until the previous one resolves.
+            // So yes, we are exclusive.
+
+            // Just in case, let's use the current state logic:
+            const newTargets = state.targetTabIds.filter(id => !failedIds.includes(id));
+            if (newTargets.length !== state.targetTabIds.length) {
+                 await updateState({ targetTabIds: newTargets });
+            }
         }
     }
 
@@ -281,7 +286,10 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         if (state.agentTabId) chrome.tabs.sendMessage(state.agentTabId, { action: "DISENGAGE_LOCAL" }).catch(() => {});
         state.targetTabIds.forEach(tId => chrome.tabs.sendMessage(tId, { action: "DISENGAGE_LOCAL" }).catch(() => {}));
 
+        await updateState(DEFAULT_STATE);
         await chrome.storage.session.clear();
+        await chrome.storage.session.remove(Object.keys(DEFAULT_STATE));
+        await updateState(DEFAULT_STATE);
     }
 
     // REMOTE_INJECT support for Popup
