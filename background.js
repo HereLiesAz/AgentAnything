@@ -1,91 +1,117 @@
-chrome.runtime.onInstalled.addListener(async () => {
-  await chrome.storage.session.set({ agentTabId: null, targetTabIds: [], lastTargetPayload: null, lastTargetSourceId: null });
+// STATE MANAGEMENT
+let agentTabId = null;
+let targetTabIds = new Set();
+let messageQueue = []; // FIFO Queue: { source: "USER"|"TARGET", content: "..." }
+let isAgentBusy = false; // The Global Lock
+
+chrome.runtime.onInstalled.addListener(() => {
   chrome.storage.session.setAccessLevel({ accessLevel: 'TRUSTED_AND_UNTRUSTED_CONTEXTS' }); 
 });
 
-chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+// --- QUEUE LOGIC ---
+function addToQueue(source, content) {
+    console.log(`[Queue] Adding item from ${source}`);
+    messageQueue.push({ source, content, timestamp: Date.now() });
+    processQueue();
+}
+
+function processQueue() {
+    if (isAgentBusy || !agentTabId || messageQueue.length === 0) return;
+
+    // Lock the Agent
+    isAgentBusy = true;
+    
+    // Get next item
+    const item = messageQueue.shift();
+    
+    // Construct Payload
+    const payload = `
+[INCOMING TRANSMISSION]
+SOURCE: ${item.source}
+TIMESTAMP: ${new Date(item.timestamp).toLocaleTimeString()}
+--------------------------------------------------
+${item.content}
+--------------------------------------------------
+[INSTRUCTION]: Process this update. Output JSON commands if needed. 
+YOU MUST END YOUR RESPONSE WITH THE TEXT: "[WAITING]"
+`;
+
+    // Send to Agent
+    console.log(`[Queue] Dispatching to Agent (Queue Size: ${messageQueue.length})`);
+    chrome.tabs.sendMessage(agentTabId, { 
+        action: "INJECT_PROMPT", 
+        payload: payload 
+    }).catch(err => {
+        console.error("Agent unreachable, releasing lock.", err);
+        isAgentBusy = false;
+    });
+}
+
+// --- MESSAGING ---
+chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   (async () => {
     const tabId = sender.tab ? sender.tab.id : null;
-    const store = await chrome.storage.session.get(['agentTabId', 'targetTabIds', 'lastTargetPayload', 'lastTargetSourceId']);
-    const targetTabIds = new Set(store.targetTabIds || []);
 
-    if (message.action === "GET_LATEST_TARGET") {
-        sendResponse(store.lastTargetPayload);
-        return;
-    }
-
-    if (message.action === "HELLO" && tabId) {
-      if (tabId === store.agentTabId) {
-        chrome.tabs.sendMessage(tabId, { action: "INIT_AGENT" }).catch(() => {});
-      } else if (targetTabIds.has(tabId)) {
-        chrome.tabs.sendMessage(tabId, { action: "INIT_TARGET", tabId: tabId }).catch(() => {});
+    // 1. ROLE ASSIGNMENT
+    if (msg.action === "ASSIGN_ROLE") {
+      if (msg.role === "AGENT") {
+        agentTabId = msg.tabId;
+        targetTabIds.delete(tabId);
+        messageQueue = []; // Clear queue on new agent
+        isAgentBusy = false;
+        console.log(`[System] Agent Assigned: ${tabId}`);
+        chrome.tabs.sendMessage(tabId, { action: "INIT_AGENT" });
+      } else {
+        targetTabIds.add(msg.tabId);
+        if (agentTabId === msg.tabId) agentTabId = null;
+        console.log(`[System] Target Assigned: ${tabId}`);
+        chrome.tabs.sendMessage(tabId, { action: "INIT_TARGET" });
       }
       return;
     }
 
-    if (message.action === "ASSIGN_ROLE") {
-      if (message.role === "AGENT") {
-        await chrome.storage.session.set({ agentTabId: message.tabId });
-        targetTabIds.delete(message.tabId); 
-        await chrome.storage.session.set({ targetTabIds: Array.from(targetTabIds) });
-        console.log(`[Background] Promoting Tab ${message.tabId} to AGENT`);
-        chrome.tabs.sendMessage(message.tabId, { action: "INIT_AGENT" }).catch(err => console.warn("Tab sleeping?", err));
-
-      } else {
-        targetTabIds.add(message.tabId);
-        await chrome.storage.session.set({ targetTabIds: Array.from(targetTabIds) });
-        if (store.agentTabId === message.tabId) await chrome.storage.session.set({ agentTabId: null });
-        console.log(`[Background] Promoting Tab ${message.tabId} to TARGET`);
-        chrome.tabs.sendMessage(message.tabId, { action: "INIT_TARGET", tabId: message.tabId }).catch(err => console.warn("Tab sleeping?", err));
-      }
-      return;
+    // 2. AGENT SIGNALING "I AM DONE"
+    if (msg.action === "AGENT_READY") {
+        console.log("[System] Agent signaled READY. Releasing lock in 2s...");
+        setTimeout(() => {
+            isAgentBusy = false;
+            processQueue(); // Try to send next item
+        }, 2000); // 2 Second Safety Delay
     }
 
-    if (message.action === "AGENT_COMMAND") {
-      const targetId = message.payload.targetTabId || store.lastTargetSourceId;
-      if (!targetId) return;
-      if (message.payload.tool === "browser") {
-        handleBrowserAction(targetId, message.payload);
-      } else {
-        chrome.tabs.sendMessage(targetId, { action: "EXECUTE_COMMAND", command: message.payload }).catch(() => {});
-      }
+    // 3. INPUTS TO QUEUE
+    if (msg.action === "QUEUE_INPUT") {
+        addToQueue(msg.source || "USER", msg.payload);
     }
 
-    // CRITICAL: This relays the Target's "I'm Done" signal back to the Agent
-    if (message.action === "TARGET_UPDATE") {
-      if (JSON.stringify(message.payload) === JSON.stringify(store.lastTargetPayload)) return; 
-      await chrome.storage.session.set({ lastTargetPayload: message.payload, lastTargetSourceId: tabId });
-      if (store.agentTabId) {
-        chrome.tabs.sendMessage(store.agentTabId, { action: "INJECT_UPDATE", sourceId: tabId, payload: message.payload }).catch(() => {});
-      }
+    // 4. TARGET UPDATES TO QUEUE
+    if (msg.action === "TARGET_UPDATE") {
+        // Only queue if it's a meaningful update or specifically requested
+        // For high-frequency updates, we might want to debounce here, 
+        // but for now, we trust the Target's debouncer.
+        addToQueue("TARGET", msg.payload.content);
+        
+        // Also forward immediate state for the parser (if needed)
+        // chrome.storage.session.set({ lastTargetPayload: msg.payload });
     }
 
-    if (message.action === "DISENGAGE_ALL") {
-        await chrome.storage.session.clear();
-        if (store.agentTabId) chrome.tabs.sendMessage(store.agentTabId, { action: "DISENGAGE_LOCAL" }).catch(() => {});
-        targetTabIds.forEach(tId => chrome.tabs.sendMessage(tId, { action: "DISENGAGE_LOCAL" }).catch(() => {}));
+    // 5. AGENT COMMANDS (Execution)
+    if (msg.action === "AGENT_COMMAND") {
+        // Execute on ALL targets for now, or specific one if ID provided
+        targetTabIds.forEach(tId => {
+            chrome.tabs.sendMessage(tId, { action: "EXECUTE_COMMAND", command: msg.payload });
+        });
     }
+
+    if (msg.action === "DISENGAGE_ALL") {
+        agentTabId = null;
+        targetTabIds.clear();
+        messageQueue = [];
+        isAgentBusy = false;
+    }
+
+    if (msg.action === "HELLO") { /* Heartbeat, ignore */ }
 
   })();
   return true;
-});
-
-function handleBrowserAction(tabId, cmd) {
-  switch (cmd.action) {
-    case "refresh": chrome.tabs.reload(tabId); break;
-    case "back": chrome.tabs.goBack(tabId); break;
-    case "forward": chrome.tabs.goForward(tabId); break;
-    case "close": chrome.tabs.remove(tabId); break;
-    case "find": chrome.tabs.sendMessage(tabId, { action: "EXECUTE_COMMAND", command: cmd }).catch(() => {}); break;
-  }
-}
-
-chrome.tabs.onRemoved.addListener(async (tabId) => {
-  const store = await chrome.storage.session.get(['agentTabId', 'targetTabIds']);
-  if (store.agentTabId === tabId) await chrome.storage.session.set({ agentTabId: null });
-  const targets = new Set(store.targetTabIds || []);
-  if (targets.has(tabId)) {
-      targets.delete(tabId);
-      await chrome.storage.session.set({ targetTabIds: Array.from(targets) });
-  }
 });
