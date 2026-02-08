@@ -1,6 +1,8 @@
 let role = null;
 let myTabId = null;
 let targetMap = [];
+let lastCommandSignature = "";
+let lastReportedContent = "";
 
 // --- Messaging Architecture ---
 
@@ -16,6 +18,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       initTargetLogic();
       break;
     case "EXECUTE_COMMAND":
+      // Handles both DOM interaction and local Browser commands (like find)
       if (role === "TARGET") executeCommand(msg.command);
       break;
     case "INJECT_OBSERVATION":
@@ -30,22 +33,31 @@ function initAgentUI() {
   console.log("%c AGENT ACTIVATED ", "background: #000; color: #0f0; font-size: 20px;");
   
   const prompt = `
-[SYSTEM: YOU ARE AN AGENT. ACCESSING EXTERNAL TOOLS.]
-I have connected you to another browser tab.
-You can control it using the following JSON format.
-Output ONLY raw JSON when taking action.
+[SYSTEM: YOU ARE AN AGENT. YOU CONTROL A BROWSER TAB.]
+I have connected you to a target tab.
+Use the following JSON commands to manipulate it. 
+Output ONLY raw JSON.
 
-COMMAND FORMAT:
+1. INTERACT WITH PAGE (Click/Type):
 \`\`\`json
 {
   "tool": "interact",
   "id": "ELEMENT_ID", 
   "action": "click" | "type" | "read",
-  "value": "your text here" (only for type)
+  "value": "text" (for type)
 }
 \`\`\`
 
-WAITING FOR TARGET CONNECTION...
+2. BROWSER CONTROL (Nav/Search):
+\`\`\`json
+{
+  "tool": "browser",
+  "action": "refresh" | "back" | "forward" | "find",
+  "value": "search term" (only for find)
+}
+\`\`\`
+
+WAITING FOR TARGET...
   `;
   
   copyToClipboard(prompt);
@@ -64,8 +76,6 @@ function observeAIOutput() {
   observer.observe(document.body, { childList: true, subtree: true, characterData: true });
 }
 
-let lastCommandSignature = "";
-
 function parseCommands(text) {
   const regex = /```json\s*(\{[\s\S]*?\})\s*```/g;
   let match;
@@ -77,21 +87,23 @@ function parseCommands(text) {
       if (sig !== lastCommandSignature) {
         lastCommandSignature = sig;
         console.log("Dispatching command:", json);
+        
+        // Pass to background. Background handles routing.
         chrome.runtime.sendMessage({ 
           action: "AGENT_COMMAND", 
           payload: { ...json, targetTabId: window.activeTargetId } 
         });
-        notify(`Sent command: ${json.action} -> ${json.id}`);
+        
+        notify(`Sent: ${json.tool}.${json.action}`);
       }
     } catch (e) {
-      console.error("Agent hallucinated invalid JSON.", e);
+      console.error("Invalid JSON from Agent.", e);
     }
   }
 }
 
 function injectObservation(sourceId, payload) {
   window.activeTargetId = sourceId;
-
   let obsWin = document.getElementById('aa-observation-deck');
   if (!obsWin) {
     obsWin = document.createElement('div');
@@ -104,128 +116,124 @@ function injectObservation(sourceId, payload) {
     document.body.appendChild(obsWin);
   }
 
-  // Handle Diff vs Full Replace
+  // Diff Engine UI Update
   if (payload.type === "APPEND") {
-    // Check if we already have the "END UPDATE" marker and insert before it, 
-    // or just append if we're feeling lazy. Lazy is faster.
-    const newContent = payload.content;
-    const currentText = obsWin.innerText;
-    
-    // Remove the old footer if it exists
-    const cleanedText = currentText.replace(/\n\n\[END UPDATE\]$/, "");
-    
-    obsWin.innerText = `${cleanedText}${newContent}\n\n[END UPDATE]`;
-    
-    // Auto-scroll to bottom to keep the feed alive
+    const currentText = obsWin.innerText.replace(/\n\n\[END UPDATE\]$/, "");
+    obsWin.innerText = `${currentText}${payload.content}\n\n[END UPDATE]`;
     obsWin.scrollTop = obsWin.scrollHeight;
     
-    // Visual cue for data ingress
+    // Visual Pulse
     obsWin.style.borderLeftColor = "#0f0";
     setTimeout(() => obsWin.style.borderLeftColor = "#333", 200);
-
   } else {
     // Full Replace
-    obsWin.innerText = `[CONNECTION ESTABLISHED TO TAB ${sourceId}]\n\n${payload.content}\n\n[END UPDATE]`;
+    obsWin.innerText = `[TARGET: ${sourceId}]\n\n${payload.content}\n\n[END UPDATE]`;
   }
 }
 
 
 // --- TARGET LOGIC (The Tool) ---
 
-// State cache for diffing
-let lastReportedContent = "";
-
 function initTargetLogic() {
   console.log("%c TARGET ACQUIRED ", "background: #000; color: #f00; font-size: 20px;");
   
-  const map = Heuristics.generateMap();
-  targetMap = map;
-  
-  const contentNode = Heuristics.findMainContent();
-  
-  const toolSchema = map.map(item => {
-    return `ID: "${item.id}" | Type: ${item.tag} | Text: "${item.text}" | Score: ${item.score.toFixed(1)}`;
-  }).join('\n');
+  // Wait a moment for dynamic sites to settle
+  setTimeout(() => {
+      const map = Heuristics.generateMap();
+      targetMap = map;
+      const contentNode = Heuristics.findMainContent();
+      
+      const toolSchema = map.map(item => {
+        return `ID: "${item.id}" | Type: ${item.tag} | Text: "${item.text}"`;
+      }).join('\n');
 
-  const fullReport = `
-TARGET CONNECTED: ${document.title}
+      const fullReport = `
+TARGET: ${document.title}
 URL: ${window.location.href}
 
-AVAILABLE INTERFACE ELEMENTS:
----------------------------------------------------
+ELEMENTS:
 ${toolSchema}
----------------------------------------------------
-CURRENT CONTENT:
+
+CONTENT:
 ${contentNode.innerText.substring(0, 1000)}
-  `;
+      `;
 
-  // Initial Seed
-  lastReportedContent = contentNode.innerText;
-  chrome.runtime.sendMessage({ 
-    action: "TARGET_UPDATE", 
-    payload: { type: "REPLACE", content: fullReport } 
-  });
+      lastReportedContent = contentNode.innerText;
+      
+      // Initial state is always a REPLACE
+      chrome.runtime.sendMessage({ 
+        action: "TARGET_UPDATE", 
+        payload: { type: "REPLACE", content: fullReport } 
+      });
 
-  // Observer
-  const observer = new MutationObserver(() => {
-    if (window.debounceUpdate) clearTimeout(window.debounceUpdate);
-    window.debounceUpdate = setTimeout(() => {
-        reportDiff(contentNode);
-    }, 1000); // 1s buffer to let typing finish
-  });
-  
-  observer.observe(contentNode, { childList: true, subtree: true, characterData: true });
+      // Diff Engine Observer
+      const observer = new MutationObserver(() => {
+        if (window.debounceUpdate) clearTimeout(window.debounceUpdate);
+        window.debounceUpdate = setTimeout(() => reportDiff(contentNode), 1000);
+      });
+      observer.observe(contentNode, { childList: true, subtree: true, characterData: true });
+  }, 1000);
 }
 
 function reportDiff(node) {
   const currentText = node.innerText;
-  
-  // If nothing changed (e.g. invisible DOM noise), do nothing.
   if (currentText === lastReportedContent) return;
 
   let payload = {};
-
-  // Check for Append (common in Chat interfaces)
   if (currentText.startsWith(lastReportedContent)) {
     const newPart = currentText.substring(lastReportedContent.length);
-    if (newPart.trim().length === 0) return; // Ignore whitespace noise
-
-    payload = {
-      type: "APPEND",
-      content: newPart
-    };
-    console.log(`DiffEngine: Sending ${newPart.length} chars (APPEND)`);
-
+    if (newPart.trim().length === 0) return;
+    payload = { type: "APPEND", content: newPart };
   } else {
-    // Content changed radically (navigation, or deletion). Send Full Update.
-    // We truncate to save tokens, assuming the Agent only needs the "now".
-    // Or we could implement a unified diff, but that's overkill for an AI agent.
-    // It usually just wants to see the new state.
-    
-    // Heuristic: If the change is massive, it's a replace.
-    payload = {
-      type: "REPLACE",
-      content: `[PAGE REFRESH/NAVIGATE]\n${currentText.substring(0, 2000)}...`
-    };
-    console.log(`DiffEngine: Sending Full Replace`);
+    payload = { type: "REPLACE", content: `[REFRESHED]\n${currentText.substring(0, 2000)}...` };
   }
 
-  // Update Cache
   lastReportedContent = currentText;
-  
-  chrome.runtime.sendMessage({ 
-    action: "TARGET_UPDATE", 
-    payload: payload 
-  });
+  chrome.runtime.sendMessage({ action: "TARGET_UPDATE", payload: payload });
 }
 
 function executeCommand(cmd) {
+  // Handle Browser Actions that must run in Content Script (e.g. Find)
+  if (cmd.tool === "browser" && cmd.action === "find") {
+      const found = window.find(cmd.value);
+      if (found) {
+        // Visual indicator
+        const sel = window.getSelection();
+        if (sel.rangeCount > 0) {
+           const range = sel.getRangeAt(0);
+           const rect = range.getBoundingClientRect();
+           
+           // Create a spotlight effect
+           const spot = document.createElement('div');
+           spot.style.cssText = `
+             position: absolute; top: ${window.scrollY + rect.top}px; left: ${window.scrollX + rect.left}px;
+             width: ${rect.width}px; height: ${rect.height}px;
+             background: rgba(255, 255, 0, 0.5); z-index: 999999; pointer-events: none;
+           `;
+           document.body.appendChild(spot);
+           setTimeout(() => spot.remove(), 2000);
+           
+           chrome.runtime.sendMessage({ 
+             action: "TARGET_UPDATE", 
+             payload: { type: "APPEND", content: `\n[BROWSER]: Found "${cmd.value}" and scrolled to it.` }
+           });
+        }
+      } else {
+        chrome.runtime.sendMessage({ 
+          action: "TARGET_UPDATE", 
+          payload: { type: "APPEND", content: `\n[BROWSER]: Text "${cmd.value}" not found.` }
+        });
+      }
+    return;
+  }
+
+  // Handle DOM Actions
   const el = document.querySelector(`[data-aa-id="${cmd.id}"]`);
   
   if (!el) {
     chrome.runtime.sendMessage({ 
         action: "TARGET_UPDATE", 
-        payload: { type: "APPEND", content: `\n[SYSTEM ERROR]: Element ${cmd.id} not found.` }
+        payload: { type: "APPEND", content: `\n[ERROR]: Element ${cmd.id} missing.` }
     });
     return;
   }
@@ -239,7 +247,6 @@ function executeCommand(cmd) {
     if (cmd.action === "click") {
       el.click();
       el.dispatchEvent(new KeyboardEvent('keydown', {'key': 'Enter'}));
-      // We don't need to report success explicitly; the MutationObserver will catch the result.
     } 
     else if (cmd.action === "type") {
       el.value = cmd.value;
@@ -247,10 +254,16 @@ function executeCommand(cmd) {
       el.dispatchEvent(new Event('input', { bubbles: true }));
       el.dispatchEvent(new Event('change', { bubbles: true }));
     }
+    else if (cmd.action === "read") {
+        chrome.runtime.sendMessage({ 
+          action: "TARGET_UPDATE", 
+          payload: { type: "APPEND", content: `\n[READ]: ${el.innerText || el.value}` }
+        });
+    }
   } catch (err) {
     chrome.runtime.sendMessage({ 
         action: "TARGET_UPDATE", 
-        payload: { type: "APPEND", content: `\n[SYSTEM ERROR]: ${err.message}` } 
+        payload: { type: "APPEND", content: `\n[ERROR]: ${err.message}` } 
     });
   }
 }
