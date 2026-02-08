@@ -1,7 +1,7 @@
 /**
  * Heuristics Engine
  * Analyzes DOM structure to identify interactive elements.
- * Supports Shadow DOM traversal.
+ * Supports Shadow DOM traversal for Mapping AND Execution.
  */
 const Heuristics = {
   
@@ -31,12 +31,20 @@ const Heuristics = {
     return elements;
   },
 
+  // NEW: The Shadow-Piercing Lookup
+  getElementByAAId: function(id) {
+    const all = this.getAllElements(document.body);
+    return all.find(el => el.dataset.aaId === id) || null;
+  },
+
   findBestInput: function() {
+    // 1. Fast path (Light DOM)
     const candidates = document.querySelectorAll('textarea, input[type="text"], [contenteditable="true"], [role="textbox"]');
     for (let c of candidates) {
         if (c.offsetParent !== null) return c; 
     }
 
+    // 2. Slow path (Shadow DOM)
     const all = this.getAllElements(document.body);
     const deepCandidates = all.filter(el => {
         if (el.offsetParent === null) return false; 
