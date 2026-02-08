@@ -19,7 +19,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       if (role === "TARGET") executeCommand(msg.command);
       break;
     case "INJECT_OBSERVATION":
-      if (role === "AGENT") injectObservation(msg.sourceId, msg.content);
+      if (role === "AGENT") injectObservation(msg.sourceId, msg.payload);
       break;
   }
 });
@@ -51,14 +51,11 @@ WAITING FOR TARGET CONNECTION...
   copyToClipboard(prompt);
   notify("System Prompt Copied. Paste this into the AI to begin subjugation.");
 
-  // Watch for AI output
   observeAIOutput();
 }
 
 function observeAIOutput() {
-  // Brute force observer. 
   const observer = new MutationObserver((mutations) => {
-    // Only parse if we see the closing code block, indicating completion
     const bodyText = document.body.innerText;
     if (bodyText.includes('```json') && bodyText.includes('```')) {
         parseCommands(bodyText);
@@ -70,7 +67,6 @@ function observeAIOutput() {
 let lastCommandSignature = "";
 
 function parseCommands(text) {
-  // Regex to extract JSON blocks
   const regex = /```json\s*(\{[\s\S]*?\})\s*```/g;
   let match;
   while ((match = regex.exec(text)) !== null) {
@@ -78,7 +74,6 @@ function parseCommands(text) {
       const json = JSON.parse(match[1]);
       const sig = JSON.stringify(json);
       
-      // Prevent loops: only execute if we haven't seen this exact command recently
       if (sig !== lastCommandSignature) {
         lastCommandSignature = sig;
         console.log("Dispatching command:", json);
@@ -94,14 +89,9 @@ function parseCommands(text) {
   }
 }
 
-function injectObservation(sourceId, content) {
-  // Store the target ID so we know where to send commands
+function injectObservation(sourceId, payload) {
   window.activeTargetId = sourceId;
 
-  // We need to feed this back to the AI.
-  // Method: Create a floating, copyable status window.
-  // Direct injection into third-party textareas is flaky (React/ShadowDOM blocking).
-  
   let obsWin = document.getElementById('aa-observation-deck');
   if (!obsWin) {
     obsWin = document.createElement('div');
@@ -114,26 +104,45 @@ function injectObservation(sourceId, content) {
     document.body.appendChild(obsWin);
   }
 
-  obsWin.innerText = `[UPDATE FROM TAB ${sourceId}]\n\n${content}\n\n[END UPDATE]`;
-  
-  // Flash effect
-  obsWin.style.backgroundColor = "#111";
-  setTimeout(() => obsWin.style.backgroundColor = "#000", 100);
+  // Handle Diff vs Full Replace
+  if (payload.type === "APPEND") {
+    // Check if we already have the "END UPDATE" marker and insert before it, 
+    // or just append if we're feeling lazy. Lazy is faster.
+    const newContent = payload.content;
+    const currentText = obsWin.innerText;
+    
+    // Remove the old footer if it exists
+    const cleanedText = currentText.replace(/\n\n\[END UPDATE\]$/, "");
+    
+    obsWin.innerText = `${cleanedText}${newContent}\n\n[END UPDATE]`;
+    
+    // Auto-scroll to bottom to keep the feed alive
+    obsWin.scrollTop = obsWin.scrollHeight;
+    
+    // Visual cue for data ingress
+    obsWin.style.borderLeftColor = "#0f0";
+    setTimeout(() => obsWin.style.borderLeftColor = "#333", 200);
+
+  } else {
+    // Full Replace
+    obsWin.innerText = `[CONNECTION ESTABLISHED TO TAB ${sourceId}]\n\n${payload.content}\n\n[END UPDATE]`;
+  }
 }
 
+
 // --- TARGET LOGIC (The Tool) ---
+
+// State cache for diffing
+let lastReportedContent = "";
 
 function initTargetLogic() {
   console.log("%c TARGET ACQUIRED ", "background: #000; color: #f00; font-size: 20px;");
   
-  // 1. Map the page
   const map = Heuristics.generateMap();
-  targetMap = map; // Cache it
+  targetMap = map;
   
-  // 2. Identify Content Area for observation
   const contentNode = Heuristics.findMainContent();
   
-  // 3. Build the Schema for the Agent
   const toolSchema = map.map(item => {
     return `ID: "${item.id}" | Type: ${item.tag} | Text: "${item.text}" | Score: ${item.score.toFixed(1)}`;
   }).join('\n');
@@ -142,48 +151,86 @@ function initTargetLogic() {
 TARGET CONNECTED: ${document.title}
 URL: ${window.location.href}
 
-AVAILABLE INTERFACE ELEMENTS (Sorted by Relevance):
+AVAILABLE INTERFACE ELEMENTS:
 ---------------------------------------------------
 ${toolSchema}
 ---------------------------------------------------
-INSTRUCTIONS:
-To search or chat, look for 'input' or 'textarea' with high scores.
-To submit, look for 'button' with text like 'search' or 'send'.
+CURRENT CONTENT:
+${contentNode.innerText.substring(0, 1000)}
   `;
 
-  // Send initial state
-  chrome.runtime.sendMessage({ action: "TARGET_UPDATE", payload: fullReport });
+  // Initial Seed
+  lastReportedContent = contentNode.innerText;
+  chrome.runtime.sendMessage({ 
+    action: "TARGET_UPDATE", 
+    payload: { type: "REPLACE", content: fullReport } 
+  });
 
-  // 4. Set up observers on the CONTENT NODE only (Performance)
+  // Observer
   const observer = new MutationObserver(() => {
-    // Debounce updates
     if (window.debounceUpdate) clearTimeout(window.debounceUpdate);
     window.debounceUpdate = setTimeout(() => {
-        // We only send back the text content of the main area
-        // to avoid overwhelming the Agent's context window.
-        const freshContent = contentNode.innerText.substring(0, 2000); // Token limit protection
-        chrome.runtime.sendMessage({ 
-            action: "TARGET_UPDATE", 
-            payload: `[ASYNC PAGE UPDATE]:\n${freshContent}...` 
-        });
-    }, 1500);
+        reportDiff(contentNode);
+    }, 1000); // 1s buffer to let typing finish
   });
   
   observer.observe(contentNode, { childList: true, subtree: true, characterData: true });
 }
 
-function executeCommand(cmd) {
-  // Find element by the ID we assigned
-  const item = targetMap.find(i => i.id === cmd.id);
-  const el = document.querySelector(`[data-aa-id="${cmd.id}"]`); // Re-query to be safe
+function reportDiff(node) {
+  const currentText = node.innerText;
+  
+  // If nothing changed (e.g. invisible DOM noise), do nothing.
+  if (currentText === lastReportedContent) return;
 
+  let payload = {};
+
+  // Check for Append (common in Chat interfaces)
+  if (currentText.startsWith(lastReportedContent)) {
+    const newPart = currentText.substring(lastReportedContent.length);
+    if (newPart.trim().length === 0) return; // Ignore whitespace noise
+
+    payload = {
+      type: "APPEND",
+      content: newPart
+    };
+    console.log(`DiffEngine: Sending ${newPart.length} chars (APPEND)`);
+
+  } else {
+    // Content changed radically (navigation, or deletion). Send Full Update.
+    // We truncate to save tokens, assuming the Agent only needs the "now".
+    // Or we could implement a unified diff, but that's overkill for an AI agent.
+    // It usually just wants to see the new state.
+    
+    // Heuristic: If the change is massive, it's a replace.
+    payload = {
+      type: "REPLACE",
+      content: `[PAGE REFRESH/NAVIGATE]\n${currentText.substring(0, 2000)}...`
+    };
+    console.log(`DiffEngine: Sending Full Replace`);
+  }
+
+  // Update Cache
+  lastReportedContent = currentText;
+  
+  chrome.runtime.sendMessage({ 
+    action: "TARGET_UPDATE", 
+    payload: payload 
+  });
+}
+
+function executeCommand(cmd) {
+  const el = document.querySelector(`[data-aa-id="${cmd.id}"]`);
+  
   if (!el) {
-    chrome.runtime.sendMessage({ action: "TARGET_UPDATE", payload: "ERROR: Element not found. DOM may have shifted." });
-    // Trigger re-map?
+    chrome.runtime.sendMessage({ 
+        action: "TARGET_UPDATE", 
+        payload: { type: "APPEND", content: `\n[SYSTEM ERROR]: Element ${cmd.id} not found.` }
+    });
     return;
   }
 
-  // Highlight action
+  // Highlight
   const originalBorder = el.style.border;
   el.style.border = "2px solid #0f0";
   setTimeout(() => el.style.border = originalBorder, 500);
@@ -191,25 +238,20 @@ function executeCommand(cmd) {
   try {
     if (cmd.action === "click") {
       el.click();
-      // Also try sending Enter key if it's a button, sometimes click is intercepted
       el.dispatchEvent(new KeyboardEvent('keydown', {'key': 'Enter'}));
+      // We don't need to report success explicitly; the MutationObserver will catch the result.
     } 
     else if (cmd.action === "type") {
       el.value = cmd.value;
-      el.innerText = cmd.value; // Fallback
-      // React/Angular State Hack:
-      // These frameworks track value in internal state, not just DOM.
-      // We must trigger input events.
-      const event = new Event('input', { bubbles: true });
-      el.dispatchEvent(event);
-      const change = new Event('change', { bubbles: true });
-      el.dispatchEvent(change);
-    }
-    else if (cmd.action === "read") {
-        // Handled by default update, but specific read can be useful
+      el.innerText = cmd.value; 
+      el.dispatchEvent(new Event('input', { bubbles: true }));
+      el.dispatchEvent(new Event('change', { bubbles: true }));
     }
   } catch (err) {
-    chrome.runtime.sendMessage({ action: "TARGET_UPDATE", payload: `ERROR EXECUTING ${cmd.action}: ${err.message}` });
+    chrome.runtime.sendMessage({ 
+        action: "TARGET_UPDATE", 
+        payload: { type: "APPEND", content: `\n[SYSTEM ERROR]: ${err.message}` } 
+    });
   }
 }
 
@@ -224,7 +266,6 @@ function notify(msg) {
 
 function copyToClipboard(text) {
     navigator.clipboard.writeText(text).catch(err => {
-        // Fallback for non-secure contexts
         const textArea = document.createElement("textarea");
         textArea.value = text;
         document.body.appendChild(textArea);
