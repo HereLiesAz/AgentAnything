@@ -1,10 +1,11 @@
+// hereliesaz/agentanything/AgentAnything-05c5b6fc4348e667e2769e1a2345ae1bf3bde566/heuristics.js
 /**
  * The Heuristic Engine.
  * Attempts to derive meaning from tag soup.
+ * Includes recursive Shadow DOM piercers.
  */
 const Heuristics = {
   
-  // Weights for determining importance
   weights: {
     input: 10,
     button: 5,
@@ -13,10 +14,11 @@ const Heuristics = {
     visibility: 5
   },
 
-  // Recursive crawler to pierce Shadow DOMs where possible
+  // Recursive crawler to pierce Shadow DOMs
   getAllElements: function(root = document.body) {
     let elements = [];
-    if (root.tagName === 'INPUT' || root.tagName === 'BUTTON' || root.tagName === 'TEXTAREA' || root.tagName === 'A') {
+    // We only care about interactive or container elements to keep perf high
+    if (['INPUT', 'BUTTON', 'TEXTAREA', 'A', 'DIV', 'SPAN', 'FORM'].includes(root.tagName)) {
       elements.push(root);
     }
     
@@ -30,6 +32,57 @@ const Heuristics = {
       }
     }
     return elements;
+  },
+
+  // NEW: Robust Input Finder for Agent AI
+  findBestInput: function() {
+    // 1. Try standard selectors first (fastest)
+    const candidates = document.querySelectorAll('textarea, input[type="text"], [contenteditable="true"], [role="textbox"]');
+    for (let c of candidates) {
+        if (c.offsetParent !== null) return c; // Visible
+    }
+
+    // 2. Deep Shadow DOM Search
+    const all = this.getAllElements(document.body);
+    const deepCandidates = all.filter(el => {
+        if (el.offsetParent === null) return false; // Hidden
+        
+        const tag = el.tagName;
+        const role = el.getAttribute('role');
+        const editable = el.getAttribute('contenteditable');
+
+        return tag === 'TEXTAREA' || 
+               (tag === 'INPUT' && !['hidden', 'checkbox', 'radio', 'submit'].includes(el.type)) ||
+               editable === 'true' ||
+               role === 'textbox';
+    });
+    
+    // Sort by size (AI inputs are usually the largest text area on screen)
+    deepCandidates.sort((a, b) => {
+        const rectA = a.getBoundingClientRect();
+        const rectB = b.getBoundingClientRect();
+        return (rectB.width * rectB.height) - (rectA.width * rectA.height);
+    });
+
+    return deepCandidates[0] || null;
+  },
+
+  // NEW: Robust Send Button Finder
+  findSendButton: function() {
+    const all = this.getAllElements(document.body);
+    return all.find(el => {
+        if (el.tagName !== 'BUTTON' && el.getAttribute('role') !== 'button') return false;
+        if (el.disabled) return false;
+        
+        const html = (el.outerHTML || "").toLowerCase();
+        const label = (el.getAttribute('aria-label') || "").toLowerCase();
+        
+        // Common icons/labels for Send
+        return label.includes('send') || 
+               label.includes('submit') || 
+               html.includes('path d="') || // SVG icon often indicates send button
+               el.innerText.match(/send|go|submit/i);
+    });
   },
 
   scoreElement: function(el) {
