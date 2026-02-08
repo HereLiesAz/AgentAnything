@@ -1,4 +1,3 @@
-// hereliesaz/agentanything/AgentAnything-05c5b6fc4348e667e2769e1a2345ae1bf3bde566/content.js
 let role = null;
 let myTabId = null;
 let targetMap = [];
@@ -101,8 +100,8 @@ function createObservationDeck() {
 function observeAIOutput() {
   const observer = new MutationObserver((mutations) => {
     const bodyText = document.body.innerText;
-    // Optimized regex trigger to reduce processing load
-    if (bodyText.match(/```(?:json)?/i)) {
+    // Optimized trigger: only parse if we see the start of a code block
+    if (bodyText.match(/```/)) {
         parseCommands(bodyText);
     }
   });
@@ -110,36 +109,65 @@ function observeAIOutput() {
 }
 
 function parseCommands(text) {
-  // Hardened Regex: Case insensitive, optional 'json' label, greedy matching
+  // Regex captures content between ```json (optional) and ```
   const regex = /```(?:json)?\s*(\{[\s\S]*?\})\s*```/gi;
   let match;
-  let foundValidCommand = false;
 
   while ((match = regex.exec(text)) !== null) {
+    let rawJson = match[1];
+    
     try {
-      const json = JSON.parse(match[1]);
-      const sig = JSON.stringify(json);
+      // 1. First Attempt: Strict JSON
+      const json = JSON.parse(rawJson);
+      dispatchIfNew(json);
+    } catch (e) {
+      console.warn("AgentAnything: Strict JSON parse failed. Attempting sanitization...", e);
       
-      if (sig !== lastCommandSignature) {
-        lastCommandSignature = sig;
-        console.log("Dispatching command:", json);
-        
-        chrome.runtime.sendMessage({ 
-          action: "AGENT_COMMAND", 
-          payload: { ...json, targetTabId: window.activeTargetId } 
-        });
-        
+      try {
+        // 2. Second Attempt: Sanitize "Dirty" JSON (e.g. unquoted keys)
+        const cleanJson = sanitizeJson(rawJson);
+        const json = JSON.parse(cleanJson);
+        console.log("AgentAnything: Sanitization successful.");
+        dispatchIfNew(json);
+      } catch (e2) {
+        console.error("AgentAnything: FATAL JSON ERROR.", e2);
+      }
+    }
+  }
+}
+
+function sanitizeJson(str) {
+  return str
+    // Remove comments //...
+    .replace(/\/\/.*$/gm, '') 
+    // Remove comments /*...*/
+    .replace(/\/\*[\s\S]*?\*\//g, '') 
+    // Fix single quotes to double
+    .replace(/'/g, '"') 
+    // Quote unquoted keys (e.g., key: "value" -> "key": "value")
+    .replace(/([{,]\s*)([a-zA-Z0-9_]+?)\s*:/g, '$1"$2":')
+    // Remove trailing commas
+    .replace(/,\s*}/g, '}')
+    .replace(/,\s*]/g, ']');
+}
+
+function dispatchIfNew(json) {
+  const sig = JSON.stringify(json);
+  if (sig !== lastCommandSignature) {
+    lastCommandSignature = sig;
+    console.log("Dispatching command:", json);
+    
+    chrome.runtime.sendMessage({ 
+      action: "AGENT_COMMAND", 
+      payload: { ...json, targetTabId: window.activeTargetId } 
+    });
+    
+    if (observationDeck) {
         const line = document.createElement('div');
         line.style.color = "#888";
         line.innerText = `>> COMMAND SENT: ${json.action}`;
         observationDeck.appendChild(line);
         observationDeck.scrollTop = observationDeck.scrollHeight;
-        foundValidCommand = true;
-      }
-    } catch (e) {
-      console.error("Agent JSON Syntax Error", e);
-      // We do NOT queue an error here to avoid loops on partial typing, 
-      // but we could if the block is definitely "closed" but invalid.
     }
   }
 }
@@ -156,7 +184,6 @@ function injectObservation(sourceId, payload) {
   if (payload.type === "APPEND") {
     aiMessage = `\n[TARGET UPDATE]:\n${payload.content}`;
   } else {
-    // Check Cortex Memory for domains
     if (payload.url) {
         try {
             const hostname = new URL(payload.url).hostname.replace(/^www\./, '');
@@ -189,13 +216,11 @@ function processQueue() {
 }
 
 /**
- * THE HARDENED STEALTH INJECTOR (V2)
+ * THE HARDENED STEALTH INJECTOR
  * - Uses Heuristics.findBestInput() to pierce Shadow DOMs.
- * - Dispatches 'beforeinput', 'input', 'change' events for React/Vue.
- * - Finds send buttons via aria-labels and icons.
+ * - Dispatches 'beforeinput', 'input', 'change' events.
  */
 function stealthTypeAndSend(text, retries = 0, callback) {
-    // We rely on Heuristics to find the input across Shadow Boundaries
     const input = Heuristics.findBestInput();
     
     // RETRY LOGIC
@@ -205,7 +230,6 @@ function stealthTypeAndSend(text, retries = 0, callback) {
             setTimeout(() => stealthTypeAndSend(text, retries + 1, callback), 1000);
             return;
         }
-        console.error("AgentAnything: FATAL - Could not find AI input box.");
         
         // Fallback: visual alert to user
         const alert = document.createElement('div');
@@ -218,7 +242,7 @@ function stealthTypeAndSend(text, retries = 0, callback) {
         return;
     }
 
-    // 1. SET VALUE (Stealthily)
+    // 1. SET VALUE
     try {
         input.focus();
         
@@ -232,7 +256,7 @@ function stealthTypeAndSend(text, retries = 0, callback) {
 
         if (nativeSetter) {
             const currentVal = input.value;
-            // Prevent duplication if we are retrying
+            // Only append if not already present (prevents duplication loops)
             if (!currentVal.endsWith(text)) {
                  const newVal = currentVal ? currentVal + "\n" + text : text;
                  nativeSetter.call(input, newVal);
@@ -244,7 +268,7 @@ function stealthTypeAndSend(text, retries = 0, callback) {
             }
         }
         
-        // Dispatch specific event sequence for modern frameworks
+        // Dispatch specific event sequence
         const events = ['beforeinput', 'input', 'change'];
         events.forEach(eventType => {
             input.dispatchEvent(new Event(eventType, { bubbles: true, cancelable: true }));
