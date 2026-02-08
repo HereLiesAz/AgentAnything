@@ -6,6 +6,10 @@ let lastReportedContent = "";
 let knownDomainContexts = new Set(); 
 let observationDeck = null;
 
+// --- MESSAGE QUEUE SYSTEM ---
+let messageQueue = [];
+let isProcessingQueue = false;
+
 // --- INITIALIZATION HANDSHAKE ---
 chrome.runtime.sendMessage({ action: "HELLO" });
 
@@ -33,7 +37,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   }
 });
 
-// --- AGENT LOGIC (THE BRAIN) ---
+// --- AGENT LOGIC ---
 
 function initAgentUI() {
   console.log("%c AGENT ACTIVATED ", "background: #000; color: #0f0; font-size: 20px;");
@@ -68,13 +72,12 @@ Output ONLY raw JSON.
 \`\`\`
 ${universal}
 
-WAITING FOR TARGET...
+[SYSTEM]: Connection Established. Waiting for user instruction or Target map...
     `;
     
-    if (!window.hasPrompted) {
-        copyToClipboard(prompt);
-        notify("System Prompt Copied.");
-        window.hasPrompted = true;
+    if (!window.hasInitialized) {
+        queueMessage(prompt);
+        window.hasInitialized = true;
     }
     
     observeAIOutput();
@@ -122,9 +125,6 @@ function parseCommands(text) {
           payload: { ...json, targetTabId: window.activeTargetId } 
         });
         
-        notify(`Sent: ${json.tool}.${json.action}`);
-        
-        // Visual feedback
         const line = document.createElement('div');
         line.style.color = "#888";
         line.innerText = `>> COMMAND SENT: ${json.action}`;
@@ -137,42 +137,119 @@ function parseCommands(text) {
   }
 }
 
-// --- THE AUTO-INPUT MODULE ---
+// --- STEALTH QUEUE SYSTEM ---
+
 function injectObservation(sourceId, payload) {
   window.activeTargetId = sourceId;
   createObservationDeck();
   
-  // 1. Update the visual deck (for human monitoring)
   updateVisualDeck(payload);
 
-  // 2. Format the message for the AI
   let aiMessage = "";
   if (payload.type === "APPEND") {
     aiMessage = `\n[TARGET UPDATE]:\n${payload.content}`;
   } else {
-    // Check Cortex Memory for this domain
-    let contextMsg = "";
+    // Check Cortex Memory
     if (payload.url) {
         try {
             const hostname = new URL(payload.url).hostname.replace(/^www\./, '');
-            // Only fetch if we haven't seen this domain this session to avoid spamming the AI
             if (!knownDomainContexts.has(hostname)) {
-                 // We can't act async here easily for the paste, so we rely on what's visually shown
-                 // Ideally we'd fetch storage here, but for speed we'll skip for now 
-                 // or you can enable it if you accept the async delay.
                  knownDomainContexts.add(hostname);
             }
         } catch(e) {}
     }
-    aiMessage = `\n[TARGET CONNECTED]:\n${payload.content}\n\n[AWAITING COMMANDS]`;
+    aiMessage = `\n[TARGET CONNECTED]:\n${payload.content}`;
   }
 
-  // 3. AUTO-TYPE AND SEND
-  // We use a debounce to prevent spamming if multiple updates come in fast
-  if (window.inputDebounce) clearTimeout(window.inputDebounce);
-  window.inputDebounce = setTimeout(() => {
-      autoTypeIntoChat(aiMessage);
-  }, 500);
+  queueMessage(aiMessage);
+}
+
+function queueMessage(text) {
+    messageQueue.push(text);
+    processQueue();
+}
+
+function processQueue() {
+    if (isProcessingQueue || messageQueue.length === 0) return;
+
+    isProcessingQueue = true;
+    const text = messageQueue.shift();
+
+    stealthTypeAndSend(text, 0, () => {
+        isProcessingQueue = false;
+        setTimeout(processQueue, 1500); 
+    });
+}
+
+/**
+ * THE HARDENED STEALTH INJECTOR
+ * Supports TextArea, Input, and ContentEditable.
+ * Includes Retry Logic if input is missing (loading state).
+ */
+function stealthTypeAndSend(text, retries = 0, callback) {
+    const input = document.querySelector('textarea, input[type="text"], [contenteditable="true"], [role="textbox"]');
+    
+    // RETRY LOGIC
+    if (!input) {
+        if (retries < 5) {
+            console.log(`AgentAnything: Input not found. Retrying (${retries + 1}/5)...`);
+            setTimeout(() => stealthTypeAndSend(text, retries + 1, callback), 1000);
+            return;
+        }
+        console.warn("AgentAnything: Could not find chat input box after retries.");
+        if (callback) callback();
+        return;
+    }
+
+    // 1. SET VALUE (Stealthily - No Focus)
+    try {
+        let nativeSetter;
+        
+        // Detect element type to use correct prototype
+        if (input instanceof HTMLTextAreaElement) {
+            nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, "value").set;
+        } else if (input instanceof HTMLInputElement) {
+            nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value").set;
+        }
+
+        if (nativeSetter) {
+            const currentVal = input.value;
+            const newVal = currentVal ? currentVal + "\n" + text : text;
+            nativeSetter.call(input, newVal);
+        } else {
+            // ContentEditable fallback
+            input.innerText = text;
+        }
+        
+        // Dispatch events to trigger framework state updates
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+        input.dispatchEvent(new Event('change', { bubbles: true }));
+    } catch (e) {
+        console.error("AgentAnything: Input Injection Failed", e);
+    }
+
+    // 2. TRIGGER SEND
+    setTimeout(() => {
+        const sendBtn = document.querySelector('button[aria-label="Send"], button[data-testid="send-button"], button[aria-label="Submit"]');
+        
+        if (sendBtn && !sendBtn.disabled) {
+            sendBtn.click();
+        } else {
+            // Fallback: Full Enter Key Sequence
+            ['keydown', 'keypress', 'keyup'].forEach(type => {
+                input.dispatchEvent(new KeyboardEvent(type, {
+                    bubbles: true, 
+                    cancelable: true, 
+                    keyCode: 13, 
+                    key: 'Enter',
+                    code: 'Enter',
+                    which: 13
+                }));
+            });
+        }
+        
+        if (callback) callback();
+    }, 500);
 }
 
 function updateVisualDeck(payload) {
@@ -192,65 +269,24 @@ function updateVisualDeck(payload) {
     observationDeck.scrollTop = observationDeck.scrollHeight;
 }
 
-function autoTypeIntoChat(text) {
-    // Heuristic to find the main chat input
-    // Works for ChatGPT, Claude, Gemini, DeepSeek
-    const input = document.querySelector('textarea, [contenteditable="true"], [role="textbox"]');
-    
-    if (!input) {
-        console.warn("AgentAnything: Could not find chat input box.");
-        return;
-    }
-
-    // React/Vue Value Setter Hack
-    // These frameworks override the standard .value property.
-    // We have to call the native setter to trigger the internal state update.
-    try {
-        const nativeTextAreaValueSetter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, "value").set;
-        const currentVal = input.value;
-        
-        // Append to existing text if any, to avoid overwriting user's draft
-        const newVal = currentVal ? currentVal + "\n" + text : text;
-        
-        nativeTextAreaValueSetter.call(input, newVal);
-        input.dispatchEvent(new Event('input', { bubbles: true }));
-    } catch (e) {
-        // Fallback for contenteditable (like some versions of ChatGPT/Claude)
-        input.innerText += text;
-        input.dispatchEvent(new Event('input', { bubbles: true }));
-    }
-
-    // Try to find the Send button
-    // We wait briefly for the UI to register the text input
-    setTimeout(() => {
-        const sendBtn = document.querySelector('button[aria-label="Send"], button[data-testid="send-button"], button[aria-label="Submit"]');
-        if (sendBtn) {
-            sendBtn.click();
-            notify("Auto-Submitted Update to AI");
-        } else {
-            // Fallback: Press Enter
-            const enterEvent = new KeyboardEvent('keydown', {
-                bubbles: true, cancelable: true, keyCode: 13, key: 'Enter'
-            });
-            input.dispatchEvent(enterEvent);
-            notify("Auto-Pressed Enter");
-        }
-    }, 200);
-}
-
 
 // --- TARGET LOGIC (THE BODY) ---
 
 function initTargetLogic() {
   console.log("%c TARGET ACQUIRED ", "background: #000; color: #f00; font-size: 20px;");
   
-  // Visual Indicator
   const indicator = document.createElement('div');
   indicator.innerText = "TARGET";
   indicator.style.cssText = "position:fixed;bottom:10px;right:10px;background:red;color:white;padding:2px 5px;z-index:999999;font-size:10px;font-family:monospace;pointer-events:none;opacity:0.5;";
   document.body.appendChild(indicator);
 
   setTimeout(() => {
+      // Safety check: ensure Heuristics is loaded
+      if (typeof Heuristics === 'undefined') {
+          console.error("AgentAnything: Heuristics library missing!");
+          return;
+      }
+
       const map = Heuristics.generateMap();
       targetMap = map;
       const contentNode = Heuristics.findMainContent();
@@ -267,79 +303,4 @@ ELEMENTS:
 ${toolSchema}
 
 CONTENT:
-${contentNode.innerText.substring(0, 1000)}
-      `;
-
-      lastReportedContent = contentNode.innerText;
-      
-      chrome.runtime.sendMessage({ 
-        action: "TARGET_UPDATE", 
-        payload: { type: "REPLACE", content: fullReport, url: window.location.href } 
-      });
-
-      const observer = new MutationObserver(() => {
-        if (window.debounceUpdate) clearTimeout(window.debounceUpdate);
-        window.debounceUpdate = setTimeout(() => reportDiff(contentNode), 1000);
-      });
-      observer.observe(contentNode, { childList: true, subtree: true, characterData: true });
-  }, 1000);
-}
-
-function reportDiff(node) {
-  const currentText = node.innerText;
-  if (currentText === lastReportedContent) return;
-
-  let payload = {};
-  if (currentText.startsWith(lastReportedContent)) {
-    const newPart = currentText.substring(lastReportedContent.length);
-    if (newPart.trim().length === 0) return;
-    payload = { type: "APPEND", content: newPart, url: window.location.href };
-  } else {
-    payload = { 
-        type: "REPLACE", 
-        content: `[REFRESHED]\n${currentText.substring(0, 2000)}...`,
-        url: window.location.href
-    };
-  }
-
-  lastReportedContent = currentText;
-  chrome.runtime.sendMessage({ action: "TARGET_UPDATE", payload: payload });
-}
-
-function executeCommand(cmd) {
-  if (cmd.tool === "browser" && cmd.action === "find") {
-      const found = window.find(cmd.value);
-      if (found) {
-           chrome.runtime.sendMessage({ 
-             action: "TARGET_UPDATE", 
-             payload: { type: "APPEND", content: `\n[BROWSER]: Found "${cmd.value}".`, url: window.location.href }
-           });
-      } else {
-        chrome.runtime.sendMessage({ 
-          action: "TARGET_UPDATE", 
-          payload: { type: "APPEND", content: `\n[BROWSER]: Text "${cmd.value}" not found.`, url: window.location.href }
-        });
-      }
-    return;
-  }
-
-  const el = document.querySelector(`[data-aa-id="${cmd.id}"]`);
-  
-  if (!el) {
-    chrome.runtime.sendMessage({ 
-        action: "TARGET_UPDATE", 
-        payload: { type: "APPEND", content: `\n[ERROR]: Element ${cmd.id} missing.`, url: window.location.href }
-    });
-    return;
-  }
-
-  // Highlight
-  const originalBorder = el.style.border;
-  el.style.border = "2px solid #0f0";
-  setTimeout(() => el.style.border = originalBorder, 500);
-
-  try {
-    if (cmd.action === "click") {
-      el.click();
-    } 
-    else if (cmd.action === "
+${contentNode.innerText.substring(
