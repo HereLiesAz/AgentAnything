@@ -1,4 +1,4 @@
-console.log("%c [AgentAnything] AUTO-PRIME LOADED ", "background: #222; color: #00ffff; font-size: 14px;");
+console.log("%c [AgentAnything] LOGIC LOADED ", "background: #000; color: #00ff00; font-size: 14px; font-weight: bold;");
 
 let role = null;
 let lastBodyLen = 0; 
@@ -14,9 +14,12 @@ function ensureUI() {
     if (shadowHost && !shadowHost.isConnected) shadowHost = null; 
     if (shadowHost) return; 
 
+    // Create shadow host
     shadowHost = document.createElement('div');
-    shadowHost.style.cssText = 'position: fixed; top: 0; left: 0; z-index: 2147483647; pointer-events: none;';
+    shadowHost.id = 'aa-ui-host';
+    shadowHost.style.cssText = 'position: fixed; top: 0; left: 0; width: 100vw; height: 100vh; z-index: 2147483647; pointer-events: none;';
     document.body.appendChild(shadowHost);
+    
     shadowRoot = shadowHost.attachShadow({ mode: 'closed' });
     
     const style = document.createElement('style');
@@ -27,11 +30,14 @@ function ensureUI() {
             font-family: monospace; font-size: 12px; padding: 8px 12px;
             border-radius: 6px; box-shadow: 0 4px 12px rgba(0,0,0,0.8);
             display: flex; align-items: center; gap: 10px; pointer-events: auto;
+            z-index: 2147483647;
         }
         .aa-dot { width: 8px; height: 8px; border-radius: 50%; background: #555; }
         .aa-dot.blue { background: #88c0d0; box-shadow: 0 0 5px #88c0d0; }
         .aa-dot.green { background: #a3be8c; box-shadow: 0 0 5px #a3be8c; }
         .aa-dot.purple { background: #b48ead; box-shadow: 0 0 5px #b48ead; }
+        .aa-dot.red { background: #bf616a; box-shadow: 0 0 5px #bf616a; }
+        .aa-dot.yellow { background: #ebcb8b; box-shadow: 0 0 5px #ebcb8b; }
     `;
     shadowRoot.appendChild(style);
 
@@ -69,32 +75,57 @@ chrome.runtime.onMessage.addListener((msg) => {
     case "EXECUTE_COMMAND":
       if (role === "TARGET") executeCommand(msg.command);
       break;
+    case "DISENGAGE_LOCAL":
+      window.location.reload();
+      break;
   }
 });
+
+// Hello loop / Heartbeat
+setInterval(() => {
+    if (!role) {
+        try { chrome.runtime.sendMessage({ action: "HELLO" }); } catch(e) {}
+    } else {
+        ensureUI();
+        if (role === "AGENT") {
+            const input = Heuristics.findBestInput();
+            if (input && input.isConnected) input.style.outline = "2px solid #a3be8c";
+        }
+    }
+}, 1000);
 
 // --- AGENT LOGIC ---
 function initAgent() {
     setStatus("AGENT: IDLE", "blue");
     
+    // 1. Trap Enter Key -> Queue
     window.addEventListener('keydown', (e) => {
         if (e.key === 'Enter' && !e.shiftKey) {
             const el = e.target;
-            if (isInput(el) && el.value.trim() !== "") {
-                e.preventDefault();
-                e.stopImmediatePropagation();
-                
-                chrome.runtime.sendMessage({ 
-                    action: "QUEUE_INPUT", 
-                    source: "USER", 
-                    payload: el.value 
-                });
-                
-                el.value = ""; 
-                setStatus("SENT TO QUEUE", "purple");
+            // Check if it's a valid input
+            if (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.getAttribute('contenteditable') === 'true') {
+                const val = el.value || el.innerText;
+                if (val && val.trim().length > 0) {
+                    e.preventDefault();
+                    e.stopImmediatePropagation();
+                    
+                    chrome.runtime.sendMessage({ 
+                        action: "QUEUE_INPUT", 
+                        source: "USER", 
+                        payload: val 
+                    });
+                    
+                    // Clear visual
+                    if(el.value) el.value = "";
+                    if(el.innerText) el.innerText = "";
+                    
+                    setStatus("SENT TO QUEUE", "purple");
+                }
             }
         }
     }, true);
 
+    // 2. Scan for [WAITING] token
     observeAgentOutput();
 }
 
@@ -105,7 +136,7 @@ function injectAgentPrompt(text) {
         return;
     }
 
-    setStatus("INJECTING QUEUE...", "purple");
+    setStatus("INJECTING...", "purple");
     setNativeValue(input, text);
     
     setTimeout(() => {
@@ -115,6 +146,7 @@ function injectAgentPrompt(text) {
         } else {
             input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', keyCode: 13, bubbles: true }));
         }
+        setStatus("AGENT: WORKING", "red");
     }, 500);
 }
 
@@ -122,11 +154,14 @@ function observeAgentOutput() {
     const observer = new MutationObserver(() => {
         const bodyText = document.body.innerText;
         
+        // 1. Parse Commands
         if (bodyText.includes('```json')) {
              parseCommands(bodyText);
         }
 
+        // 2. Scan for End of Turn
         if (bodyText.includes('[WAITING]')) {
+             // Heuristic: If we see the token, and the text length has changed significantly since we last checked
              if (Math.abs(bodyText.length - lastBodyLen) > 50) { 
                 chrome.runtime.sendMessage({ action: "AGENT_READY" });
                 lastBodyLen = bodyText.length; 
@@ -188,8 +223,6 @@ function setNativeValue(el, val) {
     el.dispatchEvent(new InputEvent('input', { bubbles: true }));
 }
 
-function isInput(el) { return el.matches && el.matches('input, textarea, [contenteditable="true"]'); }
-
 function parseCommands(text) {
     const regex = /```(?:json)?\s*(\{[\s\S]*?\})\s*```/gi;
     let match;
@@ -208,5 +241,6 @@ function waitForSettledDOM(callback) {
         timer = setTimeout(() => { observer.disconnect(); callback(); }, 800);
     });
     observer.observe(document.body, { subtree: true, childList: true, attributes: true });
+    // Failsafe 3s
     setTimeout(() => { if(timer) clearTimeout(timer); observer.disconnect(); callback(); }, 3000);
 }
