@@ -32,13 +32,15 @@ const DEFAULT_STATE = {
     targetTabs: [],
     commandQueue: [],
     isAgentBusy: false,
-    busySince: 0
+    busySince: 0,
+    elementMap: {} // NEW: elementId -> tabId mapping for O(1) lookup
 };
 
 async function getState() {
     const data = await chrome.storage.local.get(DEFAULT_STATE);
     if (!Array.isArray(data.targetTabs)) data.targetTabs = [];
     if (!Array.isArray(data.commandQueue)) data.commandQueue = [];
+    if (!data.elementMap) data.elementMap = {};
     return { ...DEFAULT_STATE, ...data };
 }
 
@@ -94,13 +96,17 @@ async function processQueue(queue) {
 
         const state = await getState();
         const agentId = state.agentTabId;
-        
+
         // TYPE: UPDATE_AGENT (Target -> Agent)
         if (item.type === 'UPDATE_AGENT') {
             if (agentId) {
+                // SECURITY: Wrap payload in strict XML tags for sanitization
+                // This mitigates indirect prompt injection by defining a data boundary.
+                const safePayload = `<browsing_context>\n${item.payload}\n</browsing_context>`;
+
                 await sendMessageToTab(agentId, {
                     action: "BUFFER_UPDATE",
-                    text: item.payload
+                    text: safePayload
                 });
             }
         }
@@ -109,9 +115,17 @@ async function processQueue(queue) {
         if (item.type === 'CLICK_TARGET') {
              const cmd = item.payload;
 
+             let targetId = cmd.targetId;
+
+             // Optimization: Lookup tabId from elementMap if targetId missing
+             if (!targetId && cmd.id && state.elementMap[cmd.id]) {
+                 targetId = state.elementMap[cmd.id];
+                 log(`[Optimization] Mapped Element ${cmd.id} to Tab ${targetId}`);
+             }
+
              let targetsToTry = state.targetTabs;
-             if (cmd.targetId) {
-                 const t = state.targetTabs.find(tab => tab.tabId === cmd.targetId);
+             if (targetId) {
+                 const t = state.targetTabs.find(tab => tab.tabId === targetId);
                  if (t) targetsToTry = [t];
              }
 
@@ -208,14 +222,13 @@ async function sendMessageToTab(tabId, message) {
 
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     (async () => {
-        const state = await getState();
+        let state = await getState();
         const tabId = sender.tab ? sender.tab.id : null;
 
         if (msg.action === "HELLO" && tabId) {
             if (state.agentTabId === tabId) {
                 sendMessageToTab(tabId, { action: "INIT_AGENT" });
             } else if (state.targetTabs.some(t => t.tabId === tabId)) {
-                // Pass config to target
                 sendMessageToTab(tabId, { action: "INIT_TARGET", config: CONFIG });
             }
         }
@@ -229,7 +242,8 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
                 await updateState({
                     agentTabId: tid,
                     targetTabs: targets,
-                    commandQueue: []
+                    commandQueue: [],
+                    elementMap: {} // Reset map on new agent session
                 });
                 sendMessageToTab(tid, { action: "INIT_AGENT" });
 
@@ -248,6 +262,14 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         }
 
         if (msg.action === "TARGET_UPDATE") {
+            // Update Element Map
+            // msg.elementIds should be an array of IDs present in this update
+            if (msg.elementIds && Array.isArray(msg.elementIds)) {
+                const newMap = { ...state.elementMap };
+                msg.elementIds.forEach(id => newMap[id] = tabId);
+                await updateState({ elementMap: newMap });
+            }
+
             await enqueue({ type: 'UPDATE_AGENT', payload: msg.payload });
         }
 

@@ -84,6 +84,7 @@ function parseDOM() {
     nextId = 1; // Reset IDs for fresh snapshot
 
     let output = [];
+    let elementIds = []; // Optimization: Track IDs for background map
 
     // Use TreeWalker (V2 Requirement)
     const walker = document.createTreeWalker(
@@ -122,11 +123,10 @@ function parseDOM() {
         if (isInteractive) {
             const id = nextId++;
             interactables[id] = el;
+            elementIds.push(id);
             el.dataset.agentId = id; // Store for debugging
 
             // "Compression: Converts the DOM into a simplified XML/Markdown schema"
-            // Example: <button id="45">Submit Order</button>
-            // Example: <input id="46" label="Email" value="" />
 
             let xml = `<${tag} id="${id}"`;
 
@@ -173,14 +173,15 @@ function parseDOM() {
         }
     }
 
-    return output.join("\n");
+    return { snapshot: output.join("\n"), elementIds: elementIds };
 }
 
 
 // --- 4. Diffing & Updates (Phase 2) ---
 
 function checkChanges() {
-    const currentSnapshot = parseDOM();
+    const result = parseDOM();
+    const currentSnapshot = result.snapshot;
 
     if (currentSnapshot !== lastSnapshot) {
         lastSnapshot = currentSnapshot;
@@ -189,7 +190,8 @@ function checkChanges() {
 
         chrome.runtime.sendMessage({
             action: "TARGET_UPDATE",
-            payload: payload
+            payload: payload,
+            elementIds: result.elementIds // Send IDs for optimization
         });
     }
 }

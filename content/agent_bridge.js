@@ -186,10 +186,6 @@ function startMonitoring() {
 }
 
 function parseCommands(text) {
-    // V2 Blueprint: "Output commands like <interact>..." or JSON
-    // V1 supported XML <tool_code> and JSON block.
-    // Let's support both for robustness as Agent prompt might vary.
-
     // XML: <tool_code>...</tool_code>
     const xmlRegex = /<tool_code>([\s\S]*?)<\/tool_code>/g;
     let match;
@@ -219,7 +215,9 @@ function parseCommands(text) {
                     chrome.runtime.sendMessage({ action: "AGENT_COMMAND", payload: json });
                     sentCommands.add(raw);
                 }
-            } catch (e) {}
+            } catch (e) {
+                console.error("Failed to parse JSON command:", e, raw);
+            }
         }
     }
 }
