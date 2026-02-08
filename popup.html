@@ -16,7 +16,6 @@
     textarea:focus { outline: none; border-color: #88c0d0; }
 
     .status { font-size: 10px; color: #888; margin-bottom: 10px; }
-    .active { color: #a3be8c; }
     
     #view-active { display: none; }
   </style>
@@ -26,8 +25,8 @@
   <div id="view-setup">
     <h2>Assign Roles</h2>
     <div class="status">Click to assign current tab:</div>
-    <button id="btn-agent" class="btn btn-agent">🕵️ Make AGENT</button>
-    <button id="btn-target" class="btn btn-target">🎯 Make TARGET</button>
+    <button id="btn-agent" class="btn btn-agent">ASSIGN: AGENT</button>
+    <button id="btn-target" class="btn btn-target">ASSIGN: TARGET</button>
   </div>
 
   <div id="view-active">
@@ -37,7 +36,7 @@
     <textarea id="remote-input" placeholder="Interject command (e.g., 'Stop and summarize')..."></textarea>
     <button id="btn-inject" class="btn btn-send">SEND COMMAND</button>
 
-    <button id="btn-kill" class="btn btn-kill">❌ DISENGAGE ALL</button>
+    <button id="btn-kill" class="btn btn-kill">DISENGAGE ALL</button>
   </div>
 
   <script src="popup.js"></script>
