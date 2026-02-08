@@ -4,7 +4,7 @@ let role = null;
 let lastBodyLen = 0; 
 let activeInput = null;
 
-// --- IMMORTAL UI (Simplified) ---
+// --- IMMORTAL UI ---
 let shadowHost = null;
 let shadowRoot = null;
 let panelEl = null;
@@ -76,7 +76,6 @@ chrome.runtime.onMessage.addListener((msg) => {
 function initAgent() {
     setStatus("AGENT: IDLE", "blue");
     
-    // 1. Trap User Input -> Send to Queue
     window.addEventListener('keydown', (e) => {
         if (e.key === 'Enter' && !e.shiftKey) {
             const el = e.target;
@@ -84,20 +83,18 @@ function initAgent() {
                 e.preventDefault();
                 e.stopImmediatePropagation();
                 
-                // Send to Background Queue
                 chrome.runtime.sendMessage({ 
                     action: "QUEUE_INPUT", 
                     source: "USER", 
                     payload: el.value 
                 });
                 
-                el.value = ""; // Clear input immediately
+                el.value = ""; 
                 setStatus("SENT TO QUEUE", "purple");
             }
         }
     }, true);
 
-    // 2. Scan for Magic Token "[WAITING]"
     observeAgentOutput();
 }
 
@@ -109,17 +106,13 @@ function injectAgentPrompt(text) {
     }
 
     setStatus("INJECTING QUEUE...", "purple");
-    
-    // Set Value
     setNativeValue(input, text);
     
-    // Click Send
     setTimeout(() => {
         const btn = Heuristics.findSendButton();
         if (btn) {
             triggerClick(btn);
         } else {
-            // Fallback Enter
             input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', keyCode: 13, bubbles: true }));
         }
     }, 500);
@@ -129,14 +122,10 @@ function observeAgentOutput() {
     const observer = new MutationObserver(() => {
         const bodyText = document.body.innerText;
         
-        // 1. Check for Commands (JSON)
         if (bodyText.includes('```json')) {
              parseCommands(bodyText);
         }
 
-        // 2. Check for END OF TURN Token ([WAITING])
-        // We look for a *change* in length to re-trigger, or just presence?
-        // Simple heuristic: If we see [WAITING] and we haven't reported it for this block length:
         if (bodyText.includes('[WAITING]')) {
              if (Math.abs(bodyText.length - lastBodyLen) > 50) { 
                 chrome.runtime.sendMessage({ action: "AGENT_READY" });
@@ -176,7 +165,6 @@ function executeCommand(cmd) {
                 if (cmd.action === "type") setNativeValue(el, cmd.value);
                 el.style.outline = "";
                 
-                // WAIT FOR SETTLED DOM
                 waitForSettledDOM(() => {
                     reportState(`ACTION_DONE:${cmd.action}`);
                 });
@@ -186,43 +174,6 @@ function executeCommand(cmd) {
 }
 
 // --- UTILS ---
-const Heuristics = {
-    getAllElements: function(root = document.body) {
-        let elements = [];
-        if (root.nodeType === Node.ELEMENT_NODE) elements.push(root);
-        if (root.shadowRoot) elements = elements.concat(this.getAllElements(root.shadowRoot));
-        if (root.children) {
-             for (let child of root.children) elements = elements.concat(this.getAllElements(child));
-        }
-        return elements;
-    },
-    getElementByAAId: function(id) { return this.getAllElements().find(el => el.dataset.aaId === id); },
-    findBestInput: function() { 
-        return document.querySelector('textarea, input[type="text"], [contenteditable="true"]') || this.getAllElements().find(el => el.tagName === 'TEXTAREA'); 
-    },
-    findSendButton: function() {
-        // Simple search for Send/Submit button
-        return this.getAllElements().find(el => {
-            const txt = (el.innerText || "").toLowerCase();
-            const aria = (el.getAttribute('aria-label') || "").toLowerCase();
-            return (el.tagName === 'BUTTON' || el.getAttribute('role') === 'button') && 
-                   (txt.includes('send') || aria.includes('send') || el.querySelector('svg'));
-        });
-    },
-    generateMap: function() {
-        // Simplified Map Generation
-        return this.getAllElements().filter(el => {
-            const rect = el.getBoundingClientRect();
-            return rect.width > 0 && rect.height > 0 && 
-                  (el.tagName === 'BUTTON' || el.tagName === 'INPUT' || el.tagName === 'A');
-        }).slice(0, 15).map(el => {
-            if (!el.dataset.aaId) el.dataset.aaId = `aa-${Math.random().toString(36).substr(2, 5)}`;
-            return { id: el.dataset.aaId, tag: el.tagName, text: (el.innerText || "").substring(0, 20) };
-        });
-    },
-    findMainContent: function() { return document.body; }
-};
-
 function triggerClick(el) {
     const opts = { bubbles: true, cancelable: true, view: window };
     el.dispatchEvent(new MouseEvent('mousedown', opts));
@@ -257,6 +208,5 @@ function waitForSettledDOM(callback) {
         timer = setTimeout(() => { observer.disconnect(); callback(); }, 800);
     });
     observer.observe(document.body, { subtree: true, childList: true, attributes: true });
-    // Failsafe
     setTimeout(() => { if(timer) clearTimeout(timer); observer.disconnect(); callback(); }, 3000);
 }
