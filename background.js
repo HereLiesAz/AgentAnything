@@ -9,18 +9,32 @@ let lastTargetId = null;
 chrome.runtime.onInstalled.addListener(async () => {
   console.log("AgentAnything Installed. Waking up all tabs...");
   
-  for (const cs of chrome.runtime.getManifest().content_scripts) {
-    for (const tab of await chrome.tabs.query({url: cs.matches})) {
-      if (tab.url.startsWith("chrome://") || tab.url.startsWith("edge://") || tab.url.startsWith("about:")) continue;
+  const manifest = chrome.runtime.getManifest();
+  
+  // We iterate through every content script definition in the manifest
+  for (const cs of manifest.content_scripts) {
+    // We find all tabs that match the content script patterns
+    // Note: This relies on the new host_permissions in manifest
+    const tabs = await chrome.tabs.query({url: cs.matches});
+    
+    for (const tab of tabs) {
+      // Skip internal browser pages where we definitely can't inject
+      if (!tab.url || tab.url.startsWith("chrome://") || tab.url.startsWith("edge://") || tab.url.startsWith("about:") || tab.url.startsWith("view-source:")) {
+        continue;
+      }
       
       try {
-        chrome.scripting.executeScript({
+        // We MUST await this to catch errors (like 'Cannot access contents of url')
+        // within this specific try/catch block.
+        await chrome.scripting.executeScript({
           target: {tabId: tab.id},
           files: cs.js,
         });
-        console.log(`Injected scripts into existing tab: ${tab.id}`);
+        console.log(`Injected scripts into existing tab: ${tab.id} (${tab.url})`);
       } catch (e) {
-        console.warn(`Could not inject into tab ${tab.id}:`, e);
+        // This catches the error you saw, logs it, and allows the loop to continue
+        // to the next tab without crashing the extension.
+        console.warn(`Could not inject into tab ${tab.id}: ${e.message}`);
       }
     }
   }
