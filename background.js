@@ -50,38 +50,58 @@ ${item.content}
 
     console.log(`[Queue] Dispatching ${item.source}`);
     
-    if (agentTabId) {
-        chrome.tabs.sendMessage(agentTabId, { 
-            action: "INJECT_PROMPT", 
-            payload: finalPayload 
-        }).catch(err => {
-            console.warn("Agent unreachable");
-            isAgentBusy = false;
-        });
-    } else {
+    // Check if agent is alive before sending
+    chrome.tabs.sendMessage(agentTabId, { 
+        action: "INJECT_PROMPT", 
+        payload: finalPayload 
+    }).catch(err => {
+        console.warn("Agent unreachable (Tab Closed?)");
+        agentTabId = null;
         isAgentBusy = false;
-    }
+    });
 }
 
 // --- MESSAGING ---
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   (async () => {
-    const tabId = sender.tab ? sender.tab.id : null;
+    const senderTabId = sender.tab ? sender.tab.id : null;
 
+    // 1. HEARTBEAT / RECOVERY
+    if (msg.action === "HELLO" && senderTabId) {
+        // If the tab just woke up, check if it's supposed to be someone
+        if (agentTabId === senderTabId) {
+            console.log(`[Recovery] Re-initializing Agent ${senderTabId}`);
+            chrome.tabs.sendMessage(senderTabId, { action: "INIT_AGENT" });
+        } else if (targetTabIds.has(senderTabId)) {
+            console.log(`[Recovery] Re-initializing Target ${senderTabId}`);
+            chrome.tabs.sendMessage(senderTabId, { action: "INIT_TARGET" });
+        }
+        return;
+    }
+
+    // 2. ROLE ASSIGNMENT
     if (msg.action === "ASSIGN_ROLE") {
+      const targetId = msg.tabId; // THE FIX: Use the payload ID, not the sender ID
+      
       if (msg.role === "AGENT") {
-        agentTabId = msg.tabId;
-        targetTabIds.delete(tabId);
+        agentTabId = targetId;
+        targetTabIds.delete(targetId);
         messageQueue = [];
         isAgentBusy = false;
-        if(tabId) chrome.tabs.sendMessage(tabId, { action: "INIT_AGENT" });
+        
+        console.log(`[System] Assigning AGENT to Tab ${targetId}`);
+        chrome.tabs.sendMessage(targetId, { action: "INIT_AGENT" });
+        
       } else {
-        targetTabIds.add(msg.tabId);
-        if (agentTabId === msg.tabId) agentTabId = null;
-        if(tabId) chrome.tabs.sendMessage(tabId, { action: "INIT_TARGET" });
+        targetTabIds.add(targetId);
+        if (agentTabId === targetId) agentTabId = null;
+        
+        console.log(`[System] Assigning TARGET to Tab ${targetId}`);
+        chrome.tabs.sendMessage(targetId, { action: "INIT_TARGET" });
       }
     }
 
+    // 3. AGENT SIGNALS
     if (msg.action === "AGENT_READY") {
         console.log("[System] Agent signaled READY.");
         setTimeout(() => {
@@ -90,16 +110,21 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         }, 2000); 
     }
 
+    // 4. DATA FLOW
     if (msg.action === "QUEUE_INPUT") addToQueue(msg.source || "USER", msg.payload);
     if (msg.action === "REMOTE_INJECT") addToQueue("ADMIN", msg.payload);
     if (msg.action === "TARGET_UPDATE") addToQueue("TARGET", msg.payload.content);
 
+    // 5. EXECUTION
     if (msg.action === "AGENT_COMMAND") {
         targetTabIds.forEach(tId => {
-            if (tId) chrome.tabs.sendMessage(tId, { action: "EXECUTE_COMMAND", command: msg.payload });
+            chrome.tabs.sendMessage(tId, { action: "EXECUTE_COMMAND", command: msg.payload }).catch(() => {
+                targetTabIds.delete(tId); // Cleanup dead targets
+            });
         });
     }
 
+    // 6. CLEANUP
     if (msg.action === "DISENGAGE_ALL") {
         agentTabId = null;
         targetTabIds.clear();
