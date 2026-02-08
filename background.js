@@ -4,7 +4,7 @@ let targetTabIds = new Set();
 let messageQueue = []; 
 let isAgentBusy = false; 
 
-// THE "GHOST" PROMPT - Automatically prepended to every transmission.
+// THE "GHOST" PROMPT
 const SYSTEM_PROTOCOL = `
 [SYSTEM HOST]: CONNECTED
 [PROTOCOL]: STRICT JSON-RPC
@@ -27,8 +27,6 @@ chrome.runtime.onInstalled.addListener(() => {
 
 // --- QUEUE LOGIC ---
 function addToQueue(source, content) {
-    // Avoid duplicate queue items if the target spams updates? 
-    // For now, we trust the flow.
     messageQueue.push({ source, content, timestamp: Date.now() });
     processQueue();
 }
@@ -39,7 +37,6 @@ function processQueue() {
     isAgentBusy = true;
     const item = messageQueue.shift();
     
-    // THE AUTO-WRAPPER
     const finalPayload = `
 ${SYSTEM_PROTOCOL}
 
@@ -54,13 +51,18 @@ ${item.content}
 
     console.log(`[Queue] Dispatching ${item.source} to Agent`);
     
-    chrome.tabs.sendMessage(agentTabId, { 
-        action: "INJECT_PROMPT", 
-        payload: finalPayload 
-    }).catch(err => {
-        console.warn("Agent unreachable. Releasing lock.");
+    // Safety check: Is agentTabId valid?
+    if (agentTabId) {
+        chrome.tabs.sendMessage(agentTabId, { 
+            action: "INJECT_PROMPT", 
+            payload: finalPayload 
+        }).catch(err => {
+            console.warn("Agent unreachable. Releasing lock.");
+            isAgentBusy = false;
+        });
+    } else {
         isAgentBusy = false;
-    });
+    }
 }
 
 // --- MESSAGING ---
@@ -74,15 +76,14 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         targetTabIds.delete(tabId);
         messageQueue = [];
         isAgentBusy = false;
-        chrome.tabs.sendMessage(tabId, { action: "INIT_AGENT" });
+        if(tabId) chrome.tabs.sendMessage(tabId, { action: "INIT_AGENT" });
       } else {
         targetTabIds.add(msg.tabId);
         if (agentTabId === msg.tabId) agentTabId = null;
-        chrome.tabs.sendMessage(tabId, { action: "INIT_TARGET" });
+        if(tabId) chrome.tabs.sendMessage(tabId, { action: "INIT_TARGET" });
       }
     }
 
-    // THE UNLOCK KEY
     if (msg.action === "AGENT_READY") {
         console.log("[System] Agent signaled READY. Resting...");
         setTimeout(() => {
@@ -95,7 +96,6 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         addToQueue(msg.source || "USER", msg.payload);
     }
 
-    // Handle Remote Inject from Popup via Queue
     if (msg.action === "REMOTE_INJECT") {
          addToQueue("ADMIN", msg.payload);
     }
@@ -106,7 +106,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
     if (msg.action === "AGENT_COMMAND") {
         targetTabIds.forEach(tId => {
-            chrome.tabs.sendMessage(tId, { action: "EXECUTE_COMMAND", command: msg.payload });
+            if (tId) chrome.tabs.sendMessage(tId, { action: "EXECUTE_COMMAND", command: msg.payload });
         });
     }
 
