@@ -1,7 +1,7 @@
 /**
- * The Heuristic Engine.
- * Attempts to derive meaning from tag soup.
- * Includes recursive Shadow DOM piercers.
+ * Heuristics Engine
+ * Analyzes DOM structure to identify interactive elements.
+ * Supports Shadow DOM traversal.
  */
 const Heuristics = {
   
@@ -13,10 +13,8 @@ const Heuristics = {
     visibility: 5
   },
 
-  // Recursive crawler to pierce Shadow DOMs
   getAllElements: function(root = document.body) {
     let elements = [];
-    // We only care about interactive or container elements to keep perf high
     if (['INPUT', 'BUTTON', 'TEXTAREA', 'A', 'DIV', 'SPAN', 'FORM'].includes(root.tagName)) {
       elements.push(root);
     }
@@ -33,18 +31,15 @@ const Heuristics = {
     return elements;
   },
 
-  // NEW: Robust Input Finder for Agent AI
   findBestInput: function() {
-    // 1. Try standard selectors first (fastest)
     const candidates = document.querySelectorAll('textarea, input[type="text"], [contenteditable="true"], [role="textbox"]');
     for (let c of candidates) {
-        if (c.offsetParent !== null) return c; // Visible
+        if (c.offsetParent !== null) return c; 
     }
 
-    // 2. Deep Shadow DOM Search
     const all = this.getAllElements(document.body);
     const deepCandidates = all.filter(el => {
-        if (el.offsetParent === null) return false; // Hidden
+        if (el.offsetParent === null) return false; 
         
         const tag = el.tagName;
         const role = el.getAttribute('role');
@@ -56,7 +51,6 @@ const Heuristics = {
                role === 'textbox';
     });
     
-    // Sort by size (AI inputs are usually the largest text area on screen)
     deepCandidates.sort((a, b) => {
         const rectA = a.getBoundingClientRect();
         const rectB = b.getBoundingClientRect();
@@ -66,7 +60,6 @@ const Heuristics = {
     return deepCandidates[0] || null;
   },
 
-  // NEW: Robust Send Button Finder
   findSendButton: function() {
     const all = this.getAllElements(document.body);
     return all.find(el => {
@@ -76,10 +69,9 @@ const Heuristics = {
         const html = (el.outerHTML || "").toLowerCase();
         const label = (el.getAttribute('aria-label') || "").toLowerCase();
         
-        // Common icons/labels for Send
         return label.includes('send') || 
                label.includes('submit') || 
-               html.includes('path d="') || // SVG icon often indicates send button
+               html.includes('path d="') || 
                el.innerText.match(/send|go|submit/i);
     });
   },
