@@ -1,7 +1,7 @@
 /**
- * Heuristics Engine
- * Analyzes DOM structure to identify interactive elements.
- * Supports Shadow DOM traversal for Mapping AND Execution.
+ * Heuristics Engine (Type-6 Hardened)
+ * Traverses deep Shadow DOM trees to locate interactive elements.
+ * Prioritizes visibility and centrality.
  */
 const Heuristics = {
   
@@ -13,16 +13,24 @@ const Heuristics = {
     visibility: 5
   },
 
+  /**
+   * Recursively gathers all elements, piercing Shadow Roots.
+   */
   getAllElements: function(root = document.body) {
     let elements = [];
-    if (['INPUT', 'BUTTON', 'TEXTAREA', 'A', 'DIV', 'SPAN', 'FORM'].includes(root.tagName)) {
-      elements.push(root);
+    if (!root) return elements;
+
+    // Add current if it's an element
+    if (root.nodeType === Node.ELEMENT_NODE) {
+        elements.push(root);
     }
     
+    // Traverse Shadow Root
     if (root.shadowRoot) {
       elements = elements.concat(this.getAllElements(root.shadowRoot));
     }
     
+    // Traverse Children
     if (root.children) {
       for (let child of root.children) {
         elements = elements.concat(this.getAllElements(child));
@@ -37,25 +45,32 @@ const Heuristics = {
   },
 
   findBestInput: function() {
-    const candidates = document.querySelectorAll('textarea, input[type="text"], [contenteditable="true"], [role="textbox"]');
-    for (let c of candidates) {
-        if (c.offsetParent !== null) return c; 
+    // 1. Check for standard active element first
+    if (document.activeElement && 
+       (document.activeElement.tagName === 'INPUT' || 
+        document.activeElement.tagName === 'TEXTAREA' || 
+        document.activeElement.getAttribute('contenteditable') === 'true')) {
+        return document.activeElement;
     }
 
     const all = this.getAllElements(document.body);
+    
+    // 2. Filter for valid inputs
     const deepCandidates = all.filter(el => {
-        if (el.offsetParent === null) return false; 
+        // Must be visible
+        if (el.offsetParent === null && window.getComputedStyle(el).display === 'none') return false; 
         
         const tag = el.tagName;
         const role = el.getAttribute('role');
         const editable = el.getAttribute('contenteditable');
 
         return tag === 'TEXTAREA' || 
-               (tag === 'INPUT' && !['hidden', 'checkbox', 'radio', 'submit'].includes(el.type)) ||
+               (tag === 'INPUT' && !['hidden', 'checkbox', 'radio', 'submit', 'button', 'image'].includes(el.type)) ||
                editable === 'true' ||
                role === 'textbox';
     });
     
+    // 3. Sort by size (heuristic: main chat inputs are usually large or wide)
     deepCandidates.sort((a, b) => {
         const rectA = a.getBoundingClientRect();
         const rectB = b.getBoundingClientRect();
@@ -68,19 +83,29 @@ const Heuristics = {
   findSendButton: function() {
     const all = this.getAllElements(document.body);
     return all.find(el => {
+        // Must be visible
+        const style = window.getComputedStyle(el);
+        if (style.display === 'none' || style.visibility === 'hidden') return false;
+        const rect = el.getBoundingClientRect();
+        if (rect.width < 5 || rect.height < 5) return false;
+
+        // Semantic checks
         if (el.tagName !== 'BUTTON' && el.getAttribute('role') !== 'button') return false;
         if (el.disabled) return false;
         
         const html = (el.outerHTML || "").toLowerCase();
         const label = (el.getAttribute('aria-label') || "").toLowerCase();
         const testId = (el.getAttribute('data-testid') || "").toLowerCase();
+        const text = (el.innerText || "").toLowerCase();
         
         return label.includes('send') || 
                label.includes('submit') || 
                testId.includes('send') ||
-               html.includes('path d="') || 
-               el.innerText.match(/send|go|submit/i) ||
-               el.querySelector('svg, img');
+               testId.includes('submit') ||
+               html.includes('path d="') ||  // SVG icons often indicate send buttons
+               text === 'send' ||
+               text === 'submit' ||
+               text === 'go';
     });
   },
 
@@ -92,6 +117,7 @@ const Heuristics = {
       return -9999;
     }
 
+    // Distance from center
     const centerX = window.innerWidth / 2;
     const centerY = window.innerHeight / 2;
     const elCenterX = rect.left + rect.width / 2;
@@ -107,7 +133,8 @@ const Heuristics = {
     if (el.tagName === 'TEXTAREA') score += 25;
     if (el.tagName === 'BUTTON' || el.getAttribute('role') === 'button') {
       score += 10;
-      if (el.innerText.match(/search|send|submit|go|chat/i)) score += 15;
+      const t = (el.innerText || "").toLowerCase();
+      if (t.match(/search|send|submit|go|chat/i)) score += 15;
     }
 
     if (rect.width > 20 && rect.height > 20) score += 5;
