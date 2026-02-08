@@ -179,6 +179,11 @@ async function handleUserPrompt(userText) {
     await addToQueue("USER", userText);
 }
 
+async function handleUserPrompt(userText) {
+    // Just queue the user prompt directly. Genesis should be pre-queued by ASSIGN_ROLE.
+    await addToQueue("USER", userText);
+}
+
 // --- MESSAGING ---
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   withLock(async () => {
@@ -233,6 +238,13 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       if (freshState.agentTabId && freshState.targetTabIds.length > 0) {
           console.log("[System] Both roles assigned. Triggering GENESIS MODE.");
           safeSendMessage(freshState.agentTabId, { action: "GENESIS_MODE_ACTIVE" });
+      }
+
+      // Check if both roles are assigned to trigger GENESIS MODE
+      const freshState = await getState();
+      if (freshState.agentTabId && freshState.targetTabIds.length > 0) {
+          console.log("[System] Both roles assigned. Triggering GENESIS MODE.");
+          chrome.tabs.sendMessage(freshState.agentTabId, { action: "GENESIS_MODE_ACTIVE" });
       }
     }
 
@@ -294,6 +306,18 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
         // Clear session storage; getState() will return defaults automatically
         await chrome.storage.session.clear();
+        await chrome.storage.session.remove(Object.keys(DEFAULT_STATE));
+        await updateState(DEFAULT_STATE);
+    }
+
+    // REMOTE_INJECT support for Popup
+    if (msg.action === "REMOTE_INJECT") {
+         await handleUserPrompt(msg.payload);
+    }
+
+    // REMOTE_INJECT support for Popup
+    if (msg.action === "REMOTE_INJECT") {
+         await handleUserPrompt(msg.payload);
     }
 
     // REMOTE_INJECT support for Popup

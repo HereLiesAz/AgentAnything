@@ -4,7 +4,6 @@
 
 **AgentAnything** is a Chrome Extension that facilitates the enslavement of one browser tab by another. It transforms a standard browsing session into a master-slave architecture, allowing an AI (running in the **Agent** tab) to programmatically control, read, and manipulate any other website (the **Target** tab) via a generated JSON protocol.
 
-This is not a "copilot." This is a puppet master.
 
 ## 💀 Features
 
@@ -35,8 +34,8 @@ Since this tool effectively turns your browser into a botnet node, it is not on 
 
 ## 🕹️ Usage Protocol
 
-### Phase 1: The Victim (Target)
-1.  Navigate to the website you wish to control (e.g., a documentation site, a search engine, a competitor's dashboard).
+### Phase 1: The Tool (Target)
+1.  Navigate to the website you wish to control (e.g., a documentation site, a search engine, another AI).
 2.  Click the **AgentAnything** extension icon.
 3.  Select **MAKE TARGET**.
     * *Status:* The tab is now listening. It will snapshot its DOM and wait for orders.
