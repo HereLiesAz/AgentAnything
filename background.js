@@ -2,7 +2,7 @@
 // MV3 Service Worker State Management
 const DEFAULT_STATE = {
     agentTabId: null,
-    targetTabIds: [], // Array for storage compatibility
+    targetTabs: [], // Array of objects: { tabId, url, status }
     messageQueue: [],
     isAgentBusy: false,
     busySince: 0,
@@ -10,11 +10,39 @@ const DEFAULT_STATE = {
     pendingGenesisPrompt: null
 };
 
+// Offscreen Keep-Alive
+let keepAliveInterval;
+
+async function createOffscreen() {
+  try {
+    if (await chrome.offscreen.hasDocument()) return;
+    await chrome.offscreen.createDocument({
+      url: 'offscreen.html',
+      reasons: ['DOM_PARSING'],
+      justification: 'Keep service worker alive for long-running agent tasks'
+    });
+  } catch (e) {
+    console.warn("Offscreen creation failed:", e);
+  }
+}
+
+function startKeepAlive() {
+  createOffscreen();
+  if (keepAliveInterval) clearInterval(keepAliveInterval);
+  keepAliveInterval = setInterval(async () => {
+    // Ping the offscreen document
+    chrome.runtime.sendMessage({ target: 'offscreen', action: 'ping' });
+  }, 20000); // 20 seconds
+}
+
+chrome.runtime.onStartup.addListener(startKeepAlive);
+startKeepAlive();
+
 // Helper to get state with defaults
 async function getState() {
     const data = await chrome.storage.session.get(DEFAULT_STATE);
-    // Ensure targetTabIds is an array (storage handles it, but just in case)
-    if (!Array.isArray(data.targetTabIds)) data.targetTabIds = [];
+    // Ensure targetTabs is an array
+    if (!Array.isArray(data.targetTabs)) data.targetTabs = [];
     return { ...DEFAULT_STATE, ...data };
 }
 
@@ -23,17 +51,26 @@ async function updateState(updates) {
     await chrome.storage.session.set(updates);
 }
 
-// Safe Message Sender
+// Safe Message Sender (Fire and Forget)
 async function safeSendMessage(tabId, message) {
     try {
         await chrome.tabs.sendMessage(tabId, message);
         return true;
     } catch (e) {
-        // Suppress "Receiving end does not exist" which happens if tab is reloading or closed
         console.log(`[System] Message to ${tabId} failed:`, e.message);
         return false;
     }
 }
+
+// Message Sender with Response
+async function sendMessageToTab(tabId, message) {
+    try {
+        return await chrome.tabs.sendMessage(tabId, message);
+    } catch (e) {
+        return null;
+    }
+}
+
 
 // Mutex for state synchronization
 let stateMutex = Promise.resolve();
@@ -72,6 +109,55 @@ ACKNOWLEDGE with "[WAITING]" if you understand.
 chrome.runtime.onInstalled.addListener(() => {
   chrome.storage.session.setAccessLevel({ accessLevel: 'TRUSTED_AND_UNTRUSTED_CONTEXTS' }); 
 });
+
+// --- EXECUTION ENGINE (CDP) ---
+
+async function executeBackgroundClick(tabId, x, y) {
+    const target = { tabId };
+    try {
+        await chrome.debugger.attach(target, "1.3");
+        await chrome.debugger.sendCommand(target, "Input.dispatchMouseEvent", {
+            type: "mousePressed", x, y, button: "left", clickCount: 1
+        });
+        await chrome.debugger.sendCommand(target, "Input.dispatchMouseEvent", {
+            type: "mouseReleased", x, y, button: "left", clickCount: 1
+        });
+    } catch (e) {
+        console.warn(`Debugger click failed on ${tabId}: ${e.message}`);
+    } finally {
+        try { await chrome.debugger.detach(target); } catch(e){}
+    }
+}
+
+async function executeBackgroundType(tabId, x, y, value) {
+    const target = { tabId };
+    try {
+        await chrome.debugger.attach(target, "1.3");
+        // Click to focus first
+        await chrome.debugger.sendCommand(target, "Input.dispatchMouseEvent", {
+            type: "mousePressed", x, y, button: "left", clickCount: 1
+        });
+        await chrome.debugger.sendCommand(target, "Input.dispatchMouseEvent", {
+            type: "mouseReleased", x, y, button: "left", clickCount: 1
+        });
+
+        // Dispatch Key Events
+        for (const char of value) {
+             // Basic support for characters
+             await chrome.debugger.sendCommand(target, "Input.dispatchKeyEvent", {
+                 type: "keyDown", text: char
+             });
+             await chrome.debugger.sendCommand(target, "Input.dispatchKeyEvent", {
+                 type: "keyUp"
+             });
+        }
+    } catch (e) {
+        console.warn(`Debugger type failed on ${tabId}: ${e.message}`);
+    } finally {
+        try { await chrome.debugger.detach(target); } catch(e){}
+    }
+}
+
 
 // --- QUEUE LOGIC ---
 async function addToQueue(source, content, forceImmediate = false) {
@@ -189,7 +275,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     if (msg.action === "HELLO" && senderTabId) {
         if (state.agentTabId === senderTabId) {
             safeSendMessage(senderTabId, { action: "INIT_AGENT" });
-        } else if (state.targetTabIds.includes(senderTabId)) {
+        } else if (state.targetTabs.some(t => t.tabId === senderTabId)) {
             safeSendMessage(senderTabId, { action: "INIT_TARGET" });
         }
         return;
@@ -199,11 +285,11 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       const targetId = msg.tabId;
       if (msg.role === "AGENT") {
         // Remove from targets if present
-        let newTargets = state.targetTabIds.filter(id => id !== targetId);
+        let newTargets = state.targetTabs.filter(t => t.tabId !== targetId);
 
         await updateState({
             agentTabId: targetId,
-            targetTabIds: newTargets,
+            targetTabs: newTargets,
             messageQueue: [],
             isAgentBusy: false,
             isGenesisComplete: false,
@@ -218,12 +304,14 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       } else {
         // Add to targets, remove from agent if matching
         let newAgentId = state.agentTabId === targetId ? null : state.agentTabId;
-        let newTargets = [...state.targetTabIds];
-        if (!newTargets.includes(targetId)) newTargets.push(targetId);
+        let newTargets = [...state.targetTabs];
+        if (!newTargets.some(t => t.tabId === targetId)) {
+            newTargets.push({ tabId: targetId, url: sender.tab?.url || "", status: 'idle' });
+        }
 
         await updateState({
             agentTabId: newAgentId,
-            targetTabIds: newTargets
+            targetTabs: newTargets
         });
 
         safeSendMessage(targetId, { action: "INIT_TARGET" });
@@ -231,7 +319,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
       // Check if both roles are assigned to trigger GENESIS MODE
       const freshState = await getState();
-      if (freshState.agentTabId && freshState.targetTabIds.length > 0) {
+      if (freshState.agentTabId && freshState.targetTabs.length > 0) {
           console.log("[System] Both roles assigned. Triggering GENESIS MODE.");
           safeSendMessage(freshState.agentTabId, { action: "GENESIS_MODE_ACTIVE" });
       }
@@ -262,39 +350,32 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     }
 
     if (msg.action === "AGENT_COMMAND") {
-        // Collect all send promises
-        const sendPromises = state.targetTabIds.map(tId =>
-            safeSendMessage(tId, { action: "EXECUTE_COMMAND", command: msg.payload })
-                .then(success => ({ id: tId, success }))
-        );
+        const cmd = msg.payload;
+        if (cmd.tool === "interact" && cmd.id) {
+            console.log(`[System] Executing AGENT COMMAND on ID: ${cmd.id}`);
 
-        const results = await Promise.all(sendPromises);
-        const failedIds = results.filter(r => !r.success).map(r => r.id);
+            // Try to find element in targets
+            for (const t of state.targetTabs) {
+                 const res = await sendMessageToTab(t.tabId, { action: "GET_COORDINATES", id: cmd.id });
+                 if (res && res.found) {
+                     console.log(`[System] Element found on Tab ${t.tabId} at (${res.x}, ${res.y})`);
 
-        if (failedIds.length > 0) {
-            // Re-fetch state inside lock to ensure we don't clobber recent add/removes
-            // But we are already inside withLock, so `state` variable is valid for this transaction?
-            // Actually, we awaited Promise.all, so other events could have queued on the mutex?
-            // No, `withLock` chains promises. The next msg handler won't run until this function finishes.
-            // So `state` is safe? Yes, because we haven't yielded the mutex.
-            // Wait, `await Promise.all` yields execution. Does `withLock` block new executions?
-            // `withLock` chains onto `stateMutex`. The next `withLock` call appends a .then() to the chain.
-            // That .then() callback won't run until the previous one resolves.
-            // So yes, we are exclusive.
-
-            // Just in case, let's use the current state logic:
-            const newTargets = state.targetTabIds.filter(id => !failedIds.includes(id));
-            if (newTargets.length !== state.targetTabIds.length) {
-                 await updateState({ targetTabIds: newTargets });
+                     if (cmd.action === "click") {
+                         await executeBackgroundClick(t.tabId, res.x, res.y);
+                     } else if (cmd.action === "type") {
+                         await executeBackgroundType(t.tabId, res.x, res.y, cmd.value || "");
+                     }
+                     break; // Found and executed
+                 }
             }
         }
     }
 
     if (msg.action === "DISENGAGE_ALL") {
         if (state.agentTabId) safeSendMessage(state.agentTabId, { action: "DISENGAGE_LOCAL" });
-        state.targetTabIds.forEach(tId => safeSendMessage(tId, { action: "DISENGAGE_LOCAL" }));
+        state.targetTabs.forEach(t => safeSendMessage(t.tabId, { action: "DISENGAGE_LOCAL" }));
 
-        // Clear session storage; getState() will return defaults automatically
+        // Clear session storage
         await chrome.storage.session.clear();
         await chrome.storage.session.remove(Object.keys(DEFAULT_STATE));
         await updateState(DEFAULT_STATE);

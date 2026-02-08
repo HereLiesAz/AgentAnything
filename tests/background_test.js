@@ -34,11 +34,10 @@ const storage = {
 global.chrome = { storage };
 
 // --- Copy Background Logic (Simplified for testing) ---
-// In a real setup, we would export/import, but for this constraint environment, we'll inline the core logic to test.
 
 const DEFAULT_STATE = {
     agentTabId: null,
-    targetTabIds: [],
+    targetTabs: [], // Array of objects
     messageQueue: [],
     isAgentBusy: false,
     busySince: 0
@@ -46,7 +45,7 @@ const DEFAULT_STATE = {
 
 async function getState() {
     const data = await chrome.storage.session.get(DEFAULT_STATE);
-    if (!Array.isArray(data.targetTabIds)) data.targetTabIds = [];
+    if (!Array.isArray(data.targetTabs)) data.targetTabs = [];
     return { ...DEFAULT_STATE, ...data };
 }
 
@@ -112,6 +111,12 @@ async function runTests() {
     });
     await Promise.all([p1, p2]);
     assert.deepStrictEqual(log, [1, 2], "Mutex should serialize execution order");
+
+    // Test 5: Target Tabs Structure
+    await updateState({ targetTabs: [{ tabId: 1, url: 'http://example.com', status: 'idle' }] });
+    state = await getState();
+    assert.strictEqual(state.targetTabs.length, 1, "Should have 1 target tab");
+    assert.strictEqual(state.targetTabs[0].url, 'http://example.com', "Should preserve target tab data");
 
     console.log("All Background Tests Passed!");
 }
