@@ -1,19 +1,42 @@
 // Service Worker V2.0 (Store-First Architecture)
 console.log("[AgentAnything] Background Service Worker V2 Loaded");
 
+// --- Configuration (Options) ---
+let CONFIG = { redactPII: true, debugMode: false };
+
+async function loadConfig() {
+    const items = await chrome.storage.sync.get({ redactPII: true, debugMode: false });
+    CONFIG = items;
+    log("[System] Config Loaded:", CONFIG);
+}
+
+function log(msg, ...args) {
+    if (CONFIG.debugMode) console.log(msg, ...args);
+}
+
+chrome.runtime.onStartup.addListener(loadConfig);
+loadConfig(); // Load immediately on script run
+
+chrome.storage.onChanged.addListener((changes, area) => {
+    if (area === 'sync') {
+        if (changes.redactPII) CONFIG.redactPII = changes.redactPII.newValue;
+        if (changes.debugMode) CONFIG.debugMode = changes.debugMode.newValue;
+        log("[System] Config Updated:", CONFIG);
+    }
+});
+
+
 // --- 1. State Persistence (chrome.storage.local) ---
-// V2 Requirement: "All queue states and active tab IDs must be saved to chrome.storage.local."
 const DEFAULT_STATE = {
     agentTabId: null,
-    targetTabs: [], // [{tabId, url, status}]
-    commandQueue: [], // [{type: 'UPDATE_AGENT'|'CLICK_TARGET', payload: ...}]
+    targetTabs: [],
+    commandQueue: [],
     isAgentBusy: false,
     busySince: 0
 };
 
 async function getState() {
     const data = await chrome.storage.local.get(DEFAULT_STATE);
-    // Ensure arrays
     if (!Array.isArray(data.targetTabs)) data.targetTabs = [];
     if (!Array.isArray(data.commandQueue)) data.commandQueue = [];
     return { ...DEFAULT_STATE, ...data };
@@ -33,7 +56,7 @@ async function createOffscreen() {
       reasons: ['DOM_PARSING'],
       justification: 'Keep service worker alive'
     });
-  } catch (e) { console.warn("Offscreen failed:", e); }
+  } catch (e) { log("Offscreen warning:", e); }
 }
 
 function startKeepAlive() {
@@ -48,7 +71,6 @@ startKeepAlive();
 
 // --- 3. Command Processing (Event Driven) ---
 
-// V2: "chrome.storage.onChanged.addListener... processQueue"
 chrome.storage.onChanged.addListener((changes, area) => {
     if (area === 'local' && changes.commandQueue) {
         const newQueue = changes.commandQueue.newValue;
@@ -58,7 +80,6 @@ chrome.storage.onChanged.addListener((changes, area) => {
     }
 });
 
-// Mutex for processing
 let isProcessing = false;
 
 async function processQueue(queue) {
@@ -66,11 +87,10 @@ async function processQueue(queue) {
     isProcessing = true;
 
     try {
-        // V2: "The Service Worker processes the queue one item at a time."
         const item = queue[0];
-        if (!item) return;
+        if (!item) { isProcessing = false; return; }
 
-        console.log(`[Queue] Processing: ${item.type}`);
+        log(`[Queue] Processing: ${item.type}`);
 
         const state = await getState();
         const agentId = state.agentTabId;
@@ -78,7 +98,6 @@ async function processQueue(queue) {
         // TYPE: UPDATE_AGENT (Target -> Agent)
         if (item.type === 'UPDATE_AGENT') {
             if (agentId) {
-                // Send to Agent Bridge (BUFFER_UPDATE)
                 await sendMessageToTab(agentId, {
                     action: "BUFFER_UPDATE",
                     text: item.payload
@@ -88,23 +107,34 @@ async function processQueue(queue) {
 
         // TYPE: CLICK_TARGET (Agent -> Target)
         if (item.type === 'CLICK_TARGET') {
-             const cmd = item.payload; // { tool: 'interact', id: 45, action: 'click' }
+             const cmd = item.payload;
 
-             // Try to find element in targets
-             for (const t of state.targetTabs) {
+             let targetsToTry = state.targetTabs;
+             if (cmd.targetId) {
+                 const t = state.targetTabs.find(tab => tab.tabId === cmd.targetId);
+                 if (t) targetsToTry = [t];
+             }
+
+             let executed = false;
+             for (const t of targetsToTry) {
                  const res = await sendMessageToTab(t.tabId, { action: "GET_COORDINATES", id: cmd.id });
                  if (res && res.found) {
+                     log(`[System] Executing on Target Tab ${t.tabId}`);
                      if (cmd.action === 'click') {
                          await executeBackgroundClick(t.tabId, res.x, res.y);
                      } else if (cmd.action === 'type') {
                          await executeBackgroundType(t.tabId, res.x, res.y, cmd.value);
                      }
+                     executed = true;
                      break;
                  }
              }
+
+             if (!executed) {
+                 log(`[System] Failed to execute command. Element ID ${cmd.id} not found.`);
+             }
         }
 
-        // Dequeue
         const remaining = queue.slice(1);
         await updateState({ commandQueue: remaining });
 
@@ -129,7 +159,7 @@ async function executeBackgroundClick(tabId, x, y) {
             type: "mouseReleased", x, y, button: "left", clickCount: 1
         });
     } catch (e) {
-        console.warn(`Debugger click failed on ${tabId}: ${e.message}`);
+        log(`Debugger click failed on ${tabId}: ${e.message}`);
     } finally {
         try {
             await chrome.debugger.detach(target);
@@ -143,7 +173,6 @@ async function executeBackgroundType(tabId, x, y, value) {
     const target = { tabId };
     try {
         await chrome.debugger.attach(target, "1.3");
-        // Focus click
         await chrome.debugger.sendCommand(target, "Input.dispatchMouseEvent", {
             type: "mousePressed", x, y, button: "left", clickCount: 1
         });
@@ -151,13 +180,12 @@ async function executeBackgroundType(tabId, x, y, value) {
             type: "mouseReleased", x, y, button: "left", clickCount: 1
         });
 
-        // Type
         for (const char of value) {
              await chrome.debugger.sendCommand(target, "Input.dispatchKeyEvent", { type: "keyDown", text: char });
              await chrome.debugger.sendCommand(target, "Input.dispatchKeyEvent", { type: "keyUp" });
         }
     } catch (e) {
-        console.warn(`Debugger type failed on ${tabId}: ${e.message}`);
+        log(`Debugger type failed on ${tabId}: ${e.message}`);
     } finally {
         try {
             await chrome.debugger.detach(target);
@@ -168,13 +196,13 @@ async function executeBackgroundType(tabId, x, y, value) {
 }
 
 
-// --- 5. Message Routing (Bridge -> SW -> Queue) ---
+// --- 5. Message Routing ---
 
 async function sendMessageToTab(tabId, message) {
     try {
         return await chrome.tabs.sendMessage(tabId, message);
     } catch (e) {
-        return null; // Tab closed or reloading
+        return null;
     }
 }
 
@@ -183,16 +211,15 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         const state = await getState();
         const tabId = sender.tab ? sender.tab.id : null;
 
-        // HELLO / INIT
         if (msg.action === "HELLO" && tabId) {
             if (state.agentTabId === tabId) {
-                sendMessageToTab(tabId, { action: "INIT_AGENT" }); // Trigger Bridge
+                sendMessageToTab(tabId, { action: "INIT_AGENT" });
             } else if (state.targetTabs.some(t => t.tabId === tabId)) {
-                sendMessageToTab(tabId, { action: "INIT_TARGET" }); // Trigger Adapter
+                // Pass config to target
+                sendMessageToTab(tabId, { action: "INIT_TARGET", config: CONFIG });
             }
         }
 
-        // ASSIGN_ROLE (from Popup)
         if (msg.action === "ASSIGN_ROLE") {
             const role = msg.role;
             const tid = msg.tabId;
@@ -202,11 +229,10 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
                 await updateState({
                     agentTabId: tid,
                     targetTabs: targets,
-                    commandQueue: [] // Clear old queue
+                    commandQueue: []
                 });
                 sendMessageToTab(tid, { action: "INIT_AGENT" });
 
-                // Inject Initial Prompt
                 const initialPrompt = "You are an autonomous agent. I will feed you the state of another tab. Output commands like `interact` to interact.";
                 await enqueue({ type: 'UPDATE_AGENT', payload: initialPrompt });
 
@@ -217,17 +243,14 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
                 }
                 const agent = state.agentTabId === tid ? null : state.agentTabId;
                 await updateState({ targetTabs: targets, agentTabId: agent });
-                sendMessageToTab(tid, { action: "INIT_TARGET" });
+                sendMessageToTab(tid, { action: "INIT_TARGET", config: CONFIG });
             }
         }
 
-        // TARGET_UPDATE (Target -> SW -> Queue -> Agent)
         if (msg.action === "TARGET_UPDATE") {
-            // Buffer into Queue
             await enqueue({ type: 'UPDATE_AGENT', payload: msg.payload });
         }
 
-        // AGENT_COMMAND (Agent -> SW -> Queue -> Target)
         if (msg.action === "AGENT_COMMAND") {
             await enqueue({ type: 'CLICK_TARGET', payload: msg.payload });
         }

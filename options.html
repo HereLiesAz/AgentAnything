@@ -1,106 +1,35 @@
 <!DOCTYPE html>
 <html>
 <head>
-  <title>AgentAnything // CORTEX</title>
-  <style>
-    body {
-      background-color: #0a0a0a;
-      color: #0f0;
-      font-family: 'Courier New', monospace;
-      padding: 40px;
-      max-width: 800px;
-      margin: 0 auto;
-    }
-    h1 {
-      border-bottom: 2px solid #333;
-      padding-bottom: 10px;
-      margin-bottom: 30px;
-      text-transform: uppercase;
-      letter-spacing: 4px;
-      font-size: 24px;
-    }
-    h2 {
-      font-size: 14px;
-      color: #666;
-      margin-top: 30px;
-      text-transform: uppercase;
-    }
-    textarea, input {
-      width: 100%;
-      background: #111;
-      border: 1px solid #333;
-      color: #ddd;
-      font-family: inherit;
-      padding: 10px;
-      box-sizing: border-box;
-      outline: none;
-    }
-    textarea:focus, input:focus {
-      border-color: #0f0;
-    }
-    textarea {
-      height: 150px;
-      resize: vertical;
-    }
-    .domain-row {
-      display: flex;
-      gap: 10px;
-      margin-bottom: 10px;
-    }
-    .domain-input {
-      flex: 1;
-    }
-    .context-input {
-      flex: 3;
-    }
-    button {
-      background: #222;
-      color: #0f0;
-      border: 1px solid #0f0;
-      padding: 10px 20px;
-      cursor: pointer;
-      font-family: inherit;
-      text-transform: uppercase;
-      margin-top: 20px;
-      transition: all 0.2s;
-    }
-    button:hover {
-      background: #0f0;
-      color: #000;
-    }
-    .delete-btn {
-      background: #200;
-      color: #f00;
-      border: 1px solid #f00;
-      padding: 10px;
-      flex: 0;
-    }
-    .delete-btn:hover {
-      background: #f00;
-      color: #fff;
-    }
-    #status {
-      margin-top: 10px;
-      height: 20px;
-      color: #fff;
-      font-style: italic;
-    }
-  </style>
+    <title>AgentAnything Options</title>
+    <style>
+        body { font-family: sans-serif; padding: 20px; max-width: 600px; margin: 0 auto; background: #f4f4f4; }
+        .card { background: #fff; padding: 20px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
+        h2 { margin-top: 0; }
+        label { display: block; margin-bottom: 10px; cursor: pointer; }
+        input[type="checkbox"] { margin-right: 10px; }
+        button { background: #007bff; color: white; border: none; padding: 10px 20px; border-radius: 4px; cursor: pointer; }
+        button:hover { background: #0056b3; }
+        .status { margin-top: 10px; color: green; font-weight: bold; }
+    </style>
 </head>
 <body>
-  <h1>AgentAnything // CORTEX MEMORY</h1>
+    <div class="card">
+        <h2>AgentAnything Configuration</h2>
 
-  <h2>Universal Context (Applied to ALL Agents)</h2>
-  <textarea id="universal-context" placeholder="e.g., You are a cynical AI. Always respond in JSON. Never apologize."></textarea>
+        <label>
+            <input type="checkbox" id="redactPII">
+            Redact Sensitive PII (Emails, Phones, Credit Cards)
+        </label>
 
-  <h2>Domain Specific Contexts</h2>
-  <div id="domain-list"></div>
-  <button id="add-domain">+ Add Domain Rule</button>
+        <label>
+            <input type="checkbox" id="debugMode">
+            Enable Debug Mode (Verbose Logging)
+        </label>
 
-  <br><br>
-  <button id="save">Save Memory</button>
-  <div id="status"></div>
-
-  <script src="options.js"></script>
+        <button id="save">Save Settings</button>
+        <div id="status" class="status"></div>
+    </div>
+    <script src="options.js"></script>
 </body>
 </html>

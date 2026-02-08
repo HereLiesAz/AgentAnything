@@ -54,7 +54,7 @@ function setContentEditableValue(element, value) {
 
     if (!success) {
         console.warn("execCommand failed, using fallback");
-        element.textContent = value;
+        element.innerHTML = `<p>${value}</p>`;
         element.dispatchEvent(new Event('input', { bubbles: true }));
     }
 }
