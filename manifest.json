@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "AgentAnything",
-  "version": "0.7.0",
-  "description": "Remote Control. Type-8 Safe Mode.",
+  "version": "0.9.0",
+  "description": "Remote Control. Genesis Sequence Architecture.",
   "permissions": [
     "activeTab",
     "scripting",
