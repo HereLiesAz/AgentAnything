@@ -46,7 +46,7 @@ function processQueue() {
     
     let finalPayload = "";
     if (item.source === "SYSTEM_INIT") {
-        finalPayload = item.content; 
+        finalPayload = item.content; // Raw injection
         console.log("[Queue] Dispatching GENESIS INSTRUCTIONS");
     } else {
         finalPayload = `
@@ -70,18 +70,50 @@ ${item.content}
     });
 }
 
-// --- SEQUENCER ---
+// --- SEQUENCER & MEMORY ---
 async function handleUserPrompt(userText) {
     if (!isGenesisComplete) {
         console.log("[Sequencer] GENESIS TRIGGERED.");
         pendingGenesisPrompt = userText;
+        
+        // 1. Queue Protocol
         addToQueue("SYSTEM_INIT", SYSTEM_INSTRUCTIONS, true);
         
+        // 2. Queue Memory (Universal + Domain)
+        const memory = await chrome.storage.sync.get({ universalContext: '', domainContexts: {} });
         const store = await chrome.storage.session.get(['lastTargetPayload']);
-        const mapContent = store.lastTargetPayload ? store.lastTargetPayload.content : "NO TARGET CONNECTED YET";
         
+        let contextBlock = "";
+        
+        // Universal
+        if (memory.universalContext) {
+            contextBlock += `[UNIVERSAL MEMORY]:\n${memory.universalContext}\n\n`;
+        }
+        
+        // Domain Specific
+        if (store.lastTargetPayload && store.lastTargetPayload.url) {
+            const targetUrl = new URL(store.lastTargetPayload.url);
+            const domain = targetUrl.hostname;
+            
+            // Simple string match for now
+            for (const [key, val] of Object.entries(memory.domainContexts)) {
+                if (domain.includes(key)) {
+                    contextBlock += `[DOMAIN RULE (${key})]:\n${val}\n\n`;
+                }
+            }
+        }
+        
+        if (contextBlock) {
+            addToQueue("CORTEX_MEMORY", contextBlock);
+        }
+        
+        // 3. Queue Target Map
+        const mapContent = store.lastTargetPayload ? store.lastTargetPayload.content : "NO TARGET CONNECTED YET";
         addToQueue("TARGET", mapContent);
+        
+        // 4. Queue User Prompt
         addToQueue("USER", pendingGenesisPrompt);
+        
         isGenesisComplete = true;
     } else {
         addToQueue("USER", userText);
@@ -138,23 +170,13 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     }
 
     if (msg.action === "DISENGAGE_ALL") {
-        console.log("[System] DISENGAGE ALL TRIGGERED");
-        
-        // 1. Broadcast Nuclear Release to Tabs
-        if (agentTabId) {
-            chrome.tabs.sendMessage(agentTabId, { action: "DISENGAGE_LOCAL" }).catch(() => {});
-        }
-        targetTabIds.forEach(tId => {
-            chrome.tabs.sendMessage(tId, { action: "DISENGAGE_LOCAL" }).catch(() => {});
-        });
-
-        // 2. Clear Memory
+        if (agentTabId) chrome.tabs.sendMessage(agentTabId, { action: "DISENGAGE_LOCAL" }).catch(() => {});
+        targetTabIds.forEach(tId => chrome.tabs.sendMessage(tId, { action: "DISENGAGE_LOCAL" }).catch(() => {}));
         agentTabId = null;
         targetTabIds.clear();
         messageQueue = [];
         isAgentBusy = false;
         isGenesisComplete = false;
-        
         await chrome.storage.session.clear();
     }
 
