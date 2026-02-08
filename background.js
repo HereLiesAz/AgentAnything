@@ -4,7 +4,7 @@ let targetTabIds = new Set();
 let messageQueue = []; 
 let isAgentBusy = false; 
 
-// THE "GHOST" PROMPT
+// THE "GHOST" PROMPT - Automatically prepended to every transmission.
 const SYSTEM_PROTOCOL = `
 [SYSTEM HOST]: CONNECTED
 [PROTOCOL]: STRICT JSON-RPC
@@ -15,7 +15,7 @@ const SYSTEM_PROTOCOL = `
 2. BROWSER:  \`\`\`json { "tool": "browser", "action": "refresh"|"back"|"find", "value": "..." } \`\`\`
 
 [RULES]:
-1. Analyze the [INCOMING TRANSMISSION].
+1. Analyze the [INCOMING TRANSMISSION] queue.
 2. Output JSON commands if action is required.
 3. CRITICAL: You MUST end your response with the strictly distinct token: "[WAITING]"
 4. The system will NOT send you new data until it sees "[WAITING]".
@@ -32,11 +32,16 @@ function addToQueue(source, content) {
 }
 
 function processQueue() {
+    // 1. Check Lock and Queue Status
     if (isAgentBusy || !agentTabId || messageQueue.length === 0) return;
 
+    // 2. Lock the Agent
     isAgentBusy = true;
+    
+    // 3. Dequeue Item
     const item = messageQueue.shift();
     
+    // 4. Construct Payload with Auto-Prime
     const finalPayload = `
 ${SYSTEM_PROTOCOL}
 
@@ -46,23 +51,19 @@ TIMESTAMP: ${new Date(item.timestamp).toLocaleTimeString()}
 --------------------------------------------------
 ${item.content}
 --------------------------------------------------
-[INSTRUCTION]: Process. Remember to end with "[WAITING]".
+[INSTRUCTION]: Process this update. Remember to end with "[WAITING]".
 `;
 
     console.log(`[Queue] Dispatching ${item.source} to Agent`);
     
-    // Safety check: Is agentTabId valid?
-    if (agentTabId) {
-        chrome.tabs.sendMessage(agentTabId, { 
-            action: "INJECT_PROMPT", 
-            payload: finalPayload 
-        }).catch(err => {
-            console.warn("Agent unreachable. Releasing lock.");
-            isAgentBusy = false;
-        });
-    } else {
+    // 5. Send to Agent
+    chrome.tabs.sendMessage(agentTabId, { 
+        action: "INJECT_PROMPT", 
+        payload: finalPayload 
+    }).catch(err => {
+        console.warn("Agent unreachable. Releasing lock.");
         isAgentBusy = false;
-    }
+    });
 }
 
 // --- MESSAGING ---
@@ -84,12 +85,13 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       }
     }
 
+    // THE UNLOCK KEY: Agent finished generating
     if (msg.action === "AGENT_READY") {
-        console.log("[System] Agent signaled READY. Resting...");
+        console.log("[System] Agent signaled READY. Waiting 2s before next turn...");
         setTimeout(() => {
             isAgentBusy = false;
             processQueue(); 
-        }, 1000); 
+        }, 2000); // 2 Second Safety Delay
     }
 
     if (msg.action === "QUEUE_INPUT") {
