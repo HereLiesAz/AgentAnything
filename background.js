@@ -127,60 +127,42 @@ ${item.content}
 }
 
 // --- SEQUENCER & MEMORY ---
-async function handleUserPrompt(userText) {
-    let state = await getState();
+async function queueGenesisInstructions() {
+    // 1. Queue Protocol
+    await addToQueue("SYSTEM_INIT", SYSTEM_INSTRUCTIONS);
 
-    if (!state.isGenesisComplete) {
-        console.log("[Sequencer] GENESIS TRIGGERED.");
-        // We don't store pendingGenesisPrompt anymore, just use it immediately?
-        // Logic used pendingGenesisPrompt to queue it later.
+    // 2. Queue Memory (Universal + Domain)
+    const memory = await chrome.storage.sync.get({ universalContext: '', domainContexts: {} });
+    const store = await chrome.storage.session.get(['lastTargetPayload']);
 
-        await updateState({ pendingGenesisPrompt: userText });
+    let contextBlock = "";
+
+    // Universal
+    if (memory.universalContext) {
+        contextBlock += `[UNIVERSAL MEMORY]:\n${memory.universalContext}\n\n`;
+    }
+
+    // Domain Specific
+    if (store.lastTargetPayload && store.lastTargetPayload.url) {
+        const targetUrl = new URL(store.lastTargetPayload.url);
+        const domain = targetUrl.hostname;
         
-        // 1. Queue Protocol
-        await addToQueue("SYSTEM_INIT", SYSTEM_INSTRUCTIONS, true);
-        
-        // 2. Queue Memory (Universal + Domain)
-        const memory = await chrome.storage.sync.get({ universalContext: '', domainContexts: {} });
-        const store = await chrome.storage.session.get(['lastTargetPayload']);
-        
-        let contextBlock = "";
-        
-        // Universal
-        if (memory.universalContext) {
-            contextBlock += `[UNIVERSAL MEMORY]:\n${memory.universalContext}\n\n`;
-        }
-        
-        // Domain Specific
-        if (store.lastTargetPayload && store.lastTargetPayload.url) {
-            const targetUrl = new URL(store.lastTargetPayload.url);
-            const domain = targetUrl.hostname;
-            
-            // Simple string match for now
-            for (const [key, val] of Object.entries(memory.domainContexts)) {
-                if (domain.includes(key)) {
-                    contextBlock += `[DOMAIN RULE (${key})]:\n${val}\n\n`;
-                }
+        // Simple string match for now
+        for (const [key, val] of Object.entries(memory.domainContexts)) {
+            if (domain.includes(key)) {
+                contextBlock += `[DOMAIN RULE (${key})]:\n${val}\n\n`;
             }
         }
-        
-        if (contextBlock) {
-            await addToQueue("CORTEX_MEMORY", contextBlock);
-        }
-        
-        // 3. Queue Target Map
-        const mapContent = store.lastTargetPayload ? store.lastTargetPayload.content : "NO TARGET CONNECTED YET";
-        await addToQueue("TARGET", mapContent);
-        
-        // 4. Queue User Prompt
-        // Refetch state to get pendingGenesisPrompt (although we just set it)
-        state = await getState();
-        await addToQueue("USER", state.pendingGenesisPrompt);
-        
-        await updateState({ isGenesisComplete: true });
-    } else {
-        await addToQueue("USER", userText);
     }
+
+    if (contextBlock) {
+        await addToQueue("CORTEX_MEMORY", contextBlock);
+    }
+}
+
+async function handleUserPrompt(userText) {
+    // Just queue the user prompt directly. Genesis should be pre-queued by ASSIGN_ROLE.
+    await addToQueue("USER", userText);
 }
 
 // --- MESSAGING ---
@@ -214,6 +196,10 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         });
 
         chrome.tabs.sendMessage(targetId, { action: "INIT_AGENT" });
+
+        // Queue Genesis Instructions IMMEDIATELY
+        await queueGenesisInstructions();
+
       } else {
         // Add to targets, remove from agent if matching
         let newAgentId = state.agentTabId === targetId ? null : state.agentTabId;
@@ -245,9 +231,9 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
     if (msg.action === "TARGET_UPDATE") {
         await chrome.storage.session.set({ lastTargetPayload: msg.payload });
-        // Check state again as handleUserPrompt might have changed it? No, just read it.
+        // Always queue the target update if we have an agent
         state = await getState();
-        if (state.isGenesisComplete) {
+        if (state.agentTabId) {
             await addToQueue("TARGET", msg.payload.content);
         }
     }
@@ -295,6 +281,21 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     // REMOTE_INJECT support for Popup
     if (msg.action === "REMOTE_INJECT") {
          await handleUserPrompt(msg.payload);
+    }
+
+    // GENESIS_INPUT_CAPTURED - The trigger for starting the loop
+    if (msg.action === "GENESIS_INPUT_CAPTURED") {
+        await addToQueue("USER", msg.payload);
+
+        // At this point, queue should have [SYSTEM_INIT, MEMORY, TARGET, USER]
+        // But we need to ensure we mark genesis as complete so future inputs are just appended
+        await updateState({ isGenesisComplete: true });
+
+        // Start the machine
+        state = await getState();
+        if (!state.isAgentBusy) {
+            await processQueue();
+        }
     }
   });
   return true;

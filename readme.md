@@ -45,11 +45,13 @@ Since this tool effectively turns your browser into a botnet node, it is not on 
 1.  Open your LLM of choice (ChatGPT, Claude, Gemini, DeepSeek) in a new tab.
 2.  Click the **AgentAnything** extension icon.
 3.  Select **MAKE AGENT**.
-    * *Status:* A System Prompt is automatically copied to your clipboard. An "Observation Deck" overlay appears on the screen.
-4.  Paste the System Prompt into the AI chat and press Enter.
+    * *Status:* The extension queues the System Instructions and Target Map. Input fields on the page will highlight green to indicate they are ready for capture.
+4.  Type your command into the AI chat (e.g., *"Search for 'glitch art' and open the first result"*).
+5.  Press **Enter** or click **Send**.
+    * *Action:* The extension intercepts your prompt, locks the UI (scrolling only), and injects the queued context (System + Target + Your Prompt) into the AI.
 
 ### Phase 3: The Loop
-1.  Issue a natural language command to the AI (e.g., *"Search for 'glitch art' and open the first result"*).
+1.  The AI receives the context and your command.
 2.  The AI outputs a JSON command block.
 3.  **AgentAnything** parses the block and transmits it to the Target.
 4.  The Target executes the action and returns a Diff of the page changes.

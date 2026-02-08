@@ -5,6 +5,7 @@ let role = null;
 let lastBodyLen = 0;
 let bootInterval = null;
 let activeInput = null; 
+let isWaitingForGenesisInput = true;
 
 // --- BOOTSTRAPPER ---
 function boot() {
@@ -96,12 +97,32 @@ function startMessaging() {
 }
 
 function initAgent() {
-    setStatus("AGENT: READY", "blue");
+    setStatus("AGENT: READY - WAITING FOR PROMPT", "blue");
     const Heuristics = window.AA_Heuristics;
+
+    // Highlight inputs immediately
+    document.addEventListener('mouseover', (e) => {
+        if (isWaitingForGenesisInput) {
+            const el = e.target;
+            if (['INPUT', 'TEXTAREA'].includes(el.tagName) || el.isContentEditable) {
+                el.style.outline = "2px dashed #00ff00";
+            }
+        }
+    }, true);
+
+    document.addEventListener('mouseout', (e) => {
+        if (isWaitingForGenesisInput) {
+            const el = e.target;
+            if (['INPUT', 'TEXTAREA'].includes(el.tagName) || el.isContentEditable) {
+                el.style.outline = "";
+            }
+        }
+    }, true);
 
     window.addEventListener('focus', (e) => {
         if (['INPUT','TEXTAREA'].includes(e.target.tagName) || e.target.isContentEditable) {
             activeInput = e.target;
+            if (isWaitingForGenesisInput) e.target.style.outline = "3px solid #00ff00";
         }
     }, true);
     
@@ -144,6 +165,9 @@ function initAgent() {
 }
 
 function triggerInterception(text, inputEl) {
+    // Only capture if we are waiting for input or if we are already running loop
+    // But actually, we always capture inputs on Agent tab to feed them into the loop.
+
     if (inputEl) {
         inputEl.style.outline = "3px solid #00ff00"; // NEON GREEN
 
@@ -164,8 +188,27 @@ function triggerInterception(text, inputEl) {
         inputEl.dispatchEvent(new InputEvent('input', { bubbles: true }));
         inputEl.dispatchEvent(new Event('change', { bubbles: true }));
     }
-    setStatus("INTERCEPTED", "neon");
-    chrome.runtime.sendMessage({ action: "QUEUE_INPUT", source: "USER", payload: text });
+
+    if (isWaitingForGenesisInput) {
+        setStatus("GENESIS PROMPT CAPTURED", "neon");
+        isWaitingForGenesisInput = false; // Lock UX
+
+        // Disable interactions except scrolling
+        const style = document.createElement('style');
+        style.id = 'aa-lock-style';
+        style.textContent = `
+            body * { pointer-events: none !important; }
+            body, html { pointer-events: auto !important; }
+            ::-webkit-scrollbar { width: 10px; }
+            ::-webkit-scrollbar-thumb { background: #555; }
+        `;
+        document.head.appendChild(style);
+
+        chrome.runtime.sendMessage({ action: "GENESIS_INPUT_CAPTURED", payload: text });
+    } else {
+        setStatus("INTERCEPTED", "neon");
+        chrome.runtime.sendMessage({ action: "QUEUE_INPUT", source: "USER", payload: text });
+    }
 }
 
 function injectAgentPrompt(text) {
