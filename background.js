@@ -1,5 +1,7 @@
 chrome.runtime.onInstalled.addListener(async () => {
   await chrome.storage.session.set({ agentTabId: null, targetTabIds: [], lastTargetPayload: null, lastTargetSourceId: null });
+  // Allow content scripts to read storage if needed in future, though we rely on messaging now.
+  chrome.storage.session.setAccessLevel({ accessLevel: 'TRUSTED_AND_UNTRUSTED_CONTEXTS' }); 
 });
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
@@ -24,13 +26,23 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
     if (message.action === "ASSIGN_ROLE") {
       if (message.role === "AGENT") {
+        // 1. Update Database
         await chrome.storage.session.set({ agentTabId: message.tabId });
         targetTabIds.delete(message.tabId); 
         await chrome.storage.session.set({ targetTabIds: Array.from(targetTabIds) });
+        
+        // 2. WAKE UP THE TAB (This was missing)
+        console.log(`[Background] Promoting Tab ${message.tabId} to AGENT`);
+        chrome.tabs.sendMessage(message.tabId, { action: "INIT_AGENT" }).catch(err => console.warn("Tab sleeping?", err));
+
       } else {
         targetTabIds.add(message.tabId);
         await chrome.storage.session.set({ targetTabIds: Array.from(targetTabIds) });
         if (store.agentTabId === message.tabId) await chrome.storage.session.set({ agentTabId: null });
+        
+        // 2. WAKE UP THE TAB (This was missing)
+        console.log(`[Background] Promoting Tab ${message.tabId} to TARGET`);
+        chrome.tabs.sendMessage(message.tabId, { action: "INIT_TARGET", tabId: message.tabId }).catch(err => console.warn("Tab sleeping?", err));
       }
       return;
     }
