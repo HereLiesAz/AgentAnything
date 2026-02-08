@@ -4,9 +4,7 @@ let targetTabIds = new Set();
 
 let messageQueue = []; 
 let isAgentBusy = false; 
-let isGenesisComplete = false; // "Have we done the setup dance?"
-
-// STORAGE FOR THE INTERCEPTED PROMPT
+let isGenesisComplete = false; 
 let pendingGenesisPrompt = null; 
 
 const SYSTEM_INSTRUCTIONS = `
@@ -33,38 +31,22 @@ chrome.runtime.onInstalled.addListener(() => {
 });
 
 // --- QUEUE LOGIC ---
-
 function addToQueue(source, content, forceImmediate = false) {
-    // Standard Queue Item
     const item = { source, content, timestamp: Date.now() };
-    
-    if (forceImmediate) {
-        // High Priority (Used for the very first instruction packet)
-        messageQueue.unshift(item);
-    } else {
-        messageQueue.push(item);
-    }
-    
+    if (forceImmediate) messageQueue.unshift(item);
+    else messageQueue.push(item);
     processQueue();
 }
 
 function processQueue() {
-    // 1. STRICT LOCK: If agent is thinking, we DO NOT disturb it.
     if (isAgentBusy || !agentTabId || messageQueue.length === 0) return;
 
-    // 2. Lock
     isAgentBusy = true;
-    
-    // 3. Dequeue
     const item = messageQueue.shift();
     
-    // 4. Wrap & Send
-    // Note: We don't wrap the SYSTEM_INSTRUCTIONS in the "Incoming Transmission" wrapper
-    // because it *is* the protocol definition.
     let finalPayload = "";
-    
     if (item.source === "SYSTEM_INIT") {
-        finalPayload = item.content; // Raw injection for instructions
+        finalPayload = item.content; 
         console.log("[Queue] Dispatching GENESIS INSTRUCTIONS");
     } else {
         finalPayload = `
@@ -90,34 +72,18 @@ ${item.content}
 
 // --- SEQUENCER ---
 async function handleUserPrompt(userText) {
-    // Scenario 1: First Run (Genesis)
     if (!isGenesisComplete) {
-        console.log("[Sequencer] GENESIS TRIGGERED. Intercepting User Prompt.");
-        
-        // 1. Stash the user's actual request
+        console.log("[Sequencer] GENESIS TRIGGERED.");
         pendingGenesisPrompt = userText;
-        
-        // 2. Queue Step 1: System Instructions
-        // This goes FIRST. Since isAgentBusy is false, it fires immediately.
         addToQueue("SYSTEM_INIT", SYSTEM_INSTRUCTIONS, true);
         
-        // 3. Queue Step 2: Target Map
-        // We fetch the latest map from storage
         const store = await chrome.storage.session.get(['lastTargetPayload']);
         const mapContent = store.lastTargetPayload ? store.lastTargetPayload.content : "NO TARGET CONNECTED YET";
         
-        // This sits in the queue. It will only fire AFTER the agent replies [WAITING] to the instructions.
         addToQueue("TARGET", mapContent);
-        
-        // 4. Queue Step 3: The User's Original Prompt
-        // This sits behind the map.
         addToQueue("USER", pendingGenesisPrompt);
-        
         isGenesisComplete = true;
-        
     } else {
-        // Scenario 2: Normal Operation
-        // Just add to queue. It waits its turn.
         addToQueue("USER", userText);
     }
 }
@@ -127,26 +93,21 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   (async () => {
     const senderTabId = sender.tab ? sender.tab.id : null;
 
-    // 1. HEARTBEAT
     if (msg.action === "HELLO" && senderTabId) {
         if (agentTabId === senderTabId) chrome.tabs.sendMessage(senderTabId, { action: "INIT_AGENT" });
         else if (targetTabIds.has(senderTabId)) chrome.tabs.sendMessage(senderTabId, { action: "INIT_TARGET" });
         return;
     }
 
-    // 2. ROLE ASSIGNMENT
     if (msg.action === "ASSIGN_ROLE") {
       const targetId = msg.tabId;
       if (msg.role === "AGENT") {
         agentTabId = targetId;
         targetTabIds.delete(targetId);
-        
-        // RESET GENESIS
         messageQueue = [];
         isAgentBusy = false;
         isGenesisComplete = false; 
         pendingGenesisPrompt = null;
-        
         chrome.tabs.sendMessage(targetId, { action: "INIT_AGENT" });
       } else {
         targetTabIds.add(targetId);
@@ -155,34 +116,21 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       }
     }
 
-    // 3. THE TURN SWITCH
     if (msg.action === "AGENT_READY") {
         console.log("[System] Agent signaled [WAITING]. Unlock.");
-        
-        // Wait a beat for the UI to settle, then unlock
         setTimeout(() => {
             isAgentBusy = false;
             processQueue(); 
         }, 2000); 
     }
 
-    // 4. INPUT INTERCEPTION
-    if (msg.action === "QUEUE_INPUT") {
-        handleUserPrompt(msg.payload);
-    }
+    if (msg.action === "QUEUE_INPUT") handleUserPrompt(msg.payload);
 
-    // 5. TARGET UPDATES
     if (msg.action === "TARGET_UPDATE") {
-        // Update storage so Genesis can find it later
         await chrome.storage.session.set({ lastTargetPayload: msg.payload });
-        
-        // If we are already running, queue the update as an event
-        if (isGenesisComplete) {
-            addToQueue("TARGET", msg.payload.content);
-        }
+        if (isGenesisComplete) addToQueue("TARGET", msg.payload.content);
     }
 
-    // 6. EXECUTION
     if (msg.action === "AGENT_COMMAND") {
         targetTabIds.forEach(tId => {
             chrome.tabs.sendMessage(tId, { action: "EXECUTE_COMMAND", command: msg.payload }).catch(() => targetTabIds.delete(tId));
@@ -190,11 +138,24 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     }
 
     if (msg.action === "DISENGAGE_ALL") {
+        console.log("[System] DISENGAGE ALL TRIGGERED");
+        
+        // 1. Broadcast Nuclear Release to Tabs
+        if (agentTabId) {
+            chrome.tabs.sendMessage(agentTabId, { action: "DISENGAGE_LOCAL" }).catch(() => {});
+        }
+        targetTabIds.forEach(tId => {
+            chrome.tabs.sendMessage(tId, { action: "DISENGAGE_LOCAL" }).catch(() => {});
+        });
+
+        // 2. Clear Memory
         agentTabId = null;
         targetTabIds.clear();
         messageQueue = [];
         isAgentBusy = false;
         isGenesisComplete = false;
+        
+        await chrome.storage.session.clear();
     }
 
   })();
