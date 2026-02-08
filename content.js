@@ -3,6 +3,7 @@ let myTabId = null;
 let targetMap = [];
 let lastCommandSignature = "";
 let lastReportedContent = "";
+let knownDomainContexts = new Set(); // Track which contexts we've already shown
 
 // --- Messaging Architecture ---
 
@@ -18,7 +19,6 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       initTargetLogic();
       break;
     case "EXECUTE_COMMAND":
-      // Handles both DOM interaction and local Browser commands (like find)
       if (role === "TARGET") executeCommand(msg.command);
       break;
     case "INJECT_OBSERVATION":
@@ -32,7 +32,11 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 function initAgentUI() {
   console.log("%c AGENT ACTIVATED ", "background: #000; color: #0f0; font-size: 20px;");
   
-  const prompt = `
+  // Fetch Universal Context from Cortex
+  chrome.storage.sync.get({ universalContext: '' }, (items) => {
+    const universal = items.universalContext ? `\n\n[UNIVERSAL CONTEXT]:\n${items.universalContext}` : "";
+
+    const prompt = `
 [SYSTEM: YOU ARE AN AGENT. YOU CONTROL A BROWSER TAB.]
 I have connected you to a target tab.
 Use the following JSON commands to manipulate it. 
@@ -56,14 +60,15 @@ Output ONLY raw JSON.
   "value": "search term" (only for find)
 }
 \`\`\`
+${universal}
 
 WAITING FOR TARGET...
-  `;
-  
-  copyToClipboard(prompt);
-  notify("System Prompt Copied. Paste this into the AI to begin subjugation.");
-
-  observeAIOutput();
+    `;
+    
+    copyToClipboard(prompt);
+    notify("System Prompt (w/ Cortex Memory) Copied.");
+    observeAIOutput();
+  });
 }
 
 function observeAIOutput() {
@@ -88,7 +93,6 @@ function parseCommands(text) {
         lastCommandSignature = sig;
         console.log("Dispatching command:", json);
         
-        // Pass to background. Background handles routing.
         chrome.runtime.sendMessage({ 
           action: "AGENT_COMMAND", 
           payload: { ...json, targetTabId: window.activeTargetId } 
@@ -116,13 +120,47 @@ function injectObservation(sourceId, payload) {
     document.body.appendChild(obsWin);
   }
 
-  // Diff Engine UI Update
+  // --- CORTEX DOMAIN CHECK ---
+  // We check if the payload contains a URL (Target reports it)
+  // If so, we check our memory for specific instructions for this domain.
+  if (payload.url) {
+    try {
+      const hostname = new URL(payload.url).hostname;
+      // Also remove 'www.' for cleaner matching
+      const cleanHost = hostname.replace(/^www\./, '');
+      
+      if (!knownDomainContexts.has(cleanHost)) {
+        chrome.storage.sync.get({ domainContexts: {} }, (items) => {
+           // Check for exact match or 'clean' match
+           const context = items.domainContexts[hostname] || items.domainContexts[cleanHost];
+           
+           if (context) {
+             const contextMsg = `\n\n[CORTEX MEMORY TRIGGERED: ${cleanHost}]\n${context}\n`;
+             
+             // Inject into visual deck
+             obsWin.innerText += contextMsg;
+             obsWin.scrollTop = obsWin.scrollHeight;
+             
+             // Copy to clipboard automatically? 
+             // No, that overrides the prompt. We'll just flash it yellow.
+             obsWin.style.borderLeftColor = "yellow";
+             setTimeout(() => obsWin.style.borderLeftColor = "#333", 1000);
+             
+             knownDomainContexts.add(cleanHost);
+           }
+        });
+      }
+    } catch (e) {
+      // URL parsing failed, ignore
+    }
+  }
+
+  // --- UI UPDATE ---
   if (payload.type === "APPEND") {
     const currentText = obsWin.innerText.replace(/\n\n\[END UPDATE\]$/, "");
     obsWin.innerText = `${currentText}${payload.content}\n\n[END UPDATE]`;
     obsWin.scrollTop = obsWin.scrollHeight;
     
-    // Visual Pulse
     obsWin.style.borderLeftColor = "#0f0";
     setTimeout(() => obsWin.style.borderLeftColor = "#333", 200);
   } else {
@@ -137,7 +175,6 @@ function injectObservation(sourceId, payload) {
 function initTargetLogic() {
   console.log("%c TARGET ACQUIRED ", "background: #000; color: #f00; font-size: 20px;");
   
-  // Wait a moment for dynamic sites to settle
   setTimeout(() => {
       const map = Heuristics.generateMap();
       targetMap = map;
@@ -160,13 +197,12 @@ ${contentNode.innerText.substring(0, 1000)}
 
       lastReportedContent = contentNode.innerText;
       
-      // Initial state is always a REPLACE
+      // Send URL in payload so Agent can do Cortex lookup
       chrome.runtime.sendMessage({ 
         action: "TARGET_UPDATE", 
-        payload: { type: "REPLACE", content: fullReport } 
+        payload: { type: "REPLACE", content: fullReport, url: window.location.href } 
       });
 
-      // Diff Engine Observer
       const observer = new MutationObserver(() => {
         if (window.debounceUpdate) clearTimeout(window.debounceUpdate);
         window.debounceUpdate = setTimeout(() => reportDiff(contentNode), 1000);
@@ -183,9 +219,13 @@ function reportDiff(node) {
   if (currentText.startsWith(lastReportedContent)) {
     const newPart = currentText.substring(lastReportedContent.length);
     if (newPart.trim().length === 0) return;
-    payload = { type: "APPEND", content: newPart };
+    payload = { type: "APPEND", content: newPart, url: window.location.href };
   } else {
-    payload = { type: "REPLACE", content: `[REFRESHED]\n${currentText.substring(0, 2000)}...` };
+    payload = { 
+        type: "REPLACE", 
+        content: `[REFRESHED]\n${currentText.substring(0, 2000)}...`,
+        url: window.location.href
+    };
   }
 
   lastReportedContent = currentText;
@@ -193,17 +233,14 @@ function reportDiff(node) {
 }
 
 function executeCommand(cmd) {
-  // Handle Browser Actions that must run in Content Script (e.g. Find)
   if (cmd.tool === "browser" && cmd.action === "find") {
       const found = window.find(cmd.value);
       if (found) {
-        // Visual indicator
         const sel = window.getSelection();
         if (sel.rangeCount > 0) {
            const range = sel.getRangeAt(0);
            const rect = range.getBoundingClientRect();
            
-           // Create a spotlight effect
            const spot = document.createElement('div');
            spot.style.cssText = `
              position: absolute; top: ${window.scrollY + rect.top}px; left: ${window.scrollX + rect.left}px;
@@ -215,30 +252,28 @@ function executeCommand(cmd) {
            
            chrome.runtime.sendMessage({ 
              action: "TARGET_UPDATE", 
-             payload: { type: "APPEND", content: `\n[BROWSER]: Found "${cmd.value}" and scrolled to it.` }
+             payload: { type: "APPEND", content: `\n[BROWSER]: Found "${cmd.value}" and scrolled to it.`, url: window.location.href }
            });
         }
       } else {
         chrome.runtime.sendMessage({ 
           action: "TARGET_UPDATE", 
-          payload: { type: "APPEND", content: `\n[BROWSER]: Text "${cmd.value}" not found.` }
+          payload: { type: "APPEND", content: `\n[BROWSER]: Text "${cmd.value}" not found.`, url: window.location.href }
         });
       }
     return;
   }
 
-  // Handle DOM Actions
   const el = document.querySelector(`[data-aa-id="${cmd.id}"]`);
   
   if (!el) {
     chrome.runtime.sendMessage({ 
         action: "TARGET_UPDATE", 
-        payload: { type: "APPEND", content: `\n[ERROR]: Element ${cmd.id} missing.` }
+        payload: { type: "APPEND", content: `\n[ERROR]: Element ${cmd.id} missing.`, url: window.location.href }
     });
     return;
   }
 
-  // Highlight
   const originalBorder = el.style.border;
   el.style.border = "2px solid #0f0";
   setTimeout(() => el.style.border = originalBorder, 500);
@@ -257,13 +292,13 @@ function executeCommand(cmd) {
     else if (cmd.action === "read") {
         chrome.runtime.sendMessage({ 
           action: "TARGET_UPDATE", 
-          payload: { type: "APPEND", content: `\n[READ]: ${el.innerText || el.value}` }
+          payload: { type: "APPEND", content: `\n[READ]: ${el.innerText || el.value}`, url: window.location.href }
         });
     }
   } catch (err) {
     chrome.runtime.sendMessage({ 
         action: "TARGET_UPDATE", 
-        payload: { type: "APPEND", content: `\n[ERROR]: ${err.message}` } 
+        payload: { type: "APPEND", content: `\n[ERROR]: ${err.message}`, url: window.location.href } 
     });
   }
 }
