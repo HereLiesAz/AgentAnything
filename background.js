@@ -15,7 +15,7 @@ function log(msg, ...args) {
 }
 
 chrome.runtime.onStartup.addListener(loadConfig);
-loadConfig(); // Load immediately on script run
+loadConfig();
 
 chrome.storage.onChanged.addListener((changes, area) => {
     if (area === 'sync') {
@@ -26,14 +26,15 @@ chrome.storage.onChanged.addListener((changes, area) => {
 });
 
 
-// --- 1. State Persistence (chrome.storage.local) ---
+// --- 1. State Persistence ---
 const DEFAULT_STATE = {
     agentTabId: null,
     targetTabs: [],
     commandQueue: [],
     isAgentBusy: false,
     busySince: 0,
-    elementMap: {} // NEW: elementId -> tabId mapping for O(1) lookup
+    elementMap: {},
+    lastActionTimestamp: 0 // Track action time for timeout
 };
 
 async function getState() {
@@ -48,7 +49,7 @@ async function updateState(updates) {
     await chrome.storage.local.set(updates);
 }
 
-// --- 2. Keep-Alive (Offscreen) ---
+// --- 2. Keep-Alive ---
 let keepAliveInterval;
 async function createOffscreen() {
   try {
@@ -66,12 +67,13 @@ function startKeepAlive() {
   if (keepAliveInterval) clearInterval(keepAliveInterval);
   keepAliveInterval = setInterval(() => {
     chrome.runtime.sendMessage({ target: 'offscreen', action: 'ping' });
+    checkTimeout(); // Check for action timeouts
   }, 20000);
 }
 chrome.runtime.onStartup.addListener(startKeepAlive);
 startKeepAlive();
 
-// --- 3. Command Processing (Event Driven) ---
+// --- 3. Command Processing ---
 
 chrome.storage.onChanged.addListener((changes, area) => {
     if (area === 'local' && changes.commandQueue) {
@@ -97,30 +99,25 @@ async function processQueue(queue) {
         const state = await getState();
         const agentId = state.agentTabId;
 
-        // TYPE: UPDATE_AGENT (Target -> Agent)
         if (item.type === 'UPDATE_AGENT') {
             if (agentId) {
-                // SECURITY: Wrap payload in strict XML tags for sanitization
-                // This mitigates indirect prompt injection by defining a data boundary.
                 const safePayload = `<browsing_context>\n${item.payload}\n</browsing_context>`;
-
                 await sendMessageToTab(agentId, {
                     action: "BUFFER_UPDATE",
                     text: safePayload
                 });
+
+                // Clear timeout logic since we got an update
+                await updateState({ lastActionTimestamp: 0 });
             }
         }
 
-        // TYPE: CLICK_TARGET (Agent -> Target)
         if (item.type === 'CLICK_TARGET') {
              const cmd = item.payload;
-
              let targetId = cmd.targetId;
 
-             // Optimization: Lookup tabId from elementMap if targetId missing
              if (!targetId && cmd.id && state.elementMap[cmd.id]) {
                  targetId = state.elementMap[cmd.id];
-                 log(`[Optimization] Mapped Element ${cmd.id} to Tab ${targetId}`);
              }
 
              let targetsToTry = state.targetTabs;
@@ -140,12 +137,16 @@ async function processQueue(queue) {
                          await executeBackgroundType(t.tabId, res.x, res.y, cmd.value);
                      }
                      executed = true;
+                     // Set timestamp for timeout check
+                     await updateState({ lastActionTimestamp: Date.now() });
                      break;
                  }
              }
 
              if (!executed) {
                  log(`[System] Failed to execute command. Element ID ${cmd.id} not found.`);
+                 // Inform agent of failure
+                 await enqueue({ type: 'UPDATE_AGENT', payload: `System Error: Element ID ${cmd.id} not found.` });
              }
         }
 
@@ -159,8 +160,18 @@ async function processQueue(queue) {
     }
 }
 
+// Timeout Logic (15s)
+async function checkTimeout() {
+    const state = await getState();
+    if (state.lastActionTimestamp > 0 && (Date.now() - state.lastActionTimestamp > 15000)) {
+        log("[System] Action Timeout. No DOM change detected.");
+        await updateState({ lastActionTimestamp: 0 });
+        await enqueue({ type: 'UPDATE_AGENT', payload: "System: Action executed but no DOM change detected within 15 seconds." });
+    }
+}
 
-// --- 4. Execution Engine (Debugger) ---
+
+// --- 4. Execution Engine ---
 
 async function executeBackgroundClick(tabId, x, y) {
     const target = { tabId };
@@ -175,11 +186,7 @@ async function executeBackgroundClick(tabId, x, y) {
     } catch (e) {
         log(`Debugger click failed on ${tabId}: ${e.message}`);
     } finally {
-        try {
-            await chrome.debugger.detach(target);
-        } catch(e) {
-            console.error(`Error detaching debugger from ${tabId}:`, e);
-        }
+        try { await chrome.debugger.detach(target); } catch(e) { console.error(e); }
     }
 }
 
@@ -193,7 +200,7 @@ async function executeBackgroundType(tabId, x, y, value) {
         await chrome.debugger.sendCommand(target, "Input.dispatchMouseEvent", {
             type: "mouseReleased", x, y, button: "left", clickCount: 1
         });
-
+        
         for (const char of value) {
              await chrome.debugger.sendCommand(target, "Input.dispatchKeyEvent", { type: "keyDown", text: char });
              await chrome.debugger.sendCommand(target, "Input.dispatchKeyEvent", { type: "keyUp" });
@@ -201,11 +208,7 @@ async function executeBackgroundType(tabId, x, y, value) {
     } catch (e) {
         log(`Debugger type failed on ${tabId}: ${e.message}`);
     } finally {
-        try {
-            await chrome.debugger.detach(target);
-        } catch(e) {
-             console.error(`Error detaching debugger from ${tabId}:`, e);
-        }
+        try { await chrome.debugger.detach(target); } catch(e) { console.error(e); }
     }
 }
 
@@ -215,9 +218,7 @@ async function executeBackgroundType(tabId, x, y, value) {
 async function sendMessageToTab(tabId, message) {
     try {
         return await chrome.tabs.sendMessage(tabId, message);
-    } catch (e) {
-        return null;
-    }
+    } catch (e) { return null; }
 }
 
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
@@ -243,7 +244,8 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
                     agentTabId: tid,
                     targetTabs: targets,
                     commandQueue: [],
-                    elementMap: {} // Reset map on new agent session
+                    elementMap: {},
+                    lastActionTimestamp: 0
                 });
                 sendMessageToTab(tid, { action: "INIT_AGENT" });
 
@@ -262,19 +264,23 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         }
 
         if (msg.action === "TARGET_UPDATE") {
-            // Update Element Map
-            // msg.elementIds should be an array of IDs present in this update
             if (msg.elementIds && Array.isArray(msg.elementIds)) {
                 const newMap = { ...state.elementMap };
                 msg.elementIds.forEach(id => newMap[id] = tabId);
                 await updateState({ elementMap: newMap });
             }
-
             await enqueue({ type: 'UPDATE_AGENT', payload: msg.payload });
         }
 
         if (msg.action === "AGENT_COMMAND") {
             await enqueue({ type: 'CLICK_TARGET', payload: msg.payload });
+        }
+
+        // Handle User Interruption
+        if (msg.action === "USER_INTERRUPT") {
+            log("[System] User Interruption Detected. Clearing Queue.");
+            await updateState({ commandQueue: [], lastActionTimestamp: 0 });
+            await enqueue({ type: 'UPDATE_AGENT', payload: "System: User manually interacted with the page. Queue cleared. Please re-assess state." });
         }
 
     })();

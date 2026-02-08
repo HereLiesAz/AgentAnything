@@ -84,16 +84,14 @@ function parseDOM() {
     nextId = 1; // Reset IDs for fresh snapshot
 
     let output = [];
-    let elementIds = []; // Optimization: Track IDs for background map
+    let elementIds = [];
 
-    // Use TreeWalker (V2 Requirement)
     const walker = document.createTreeWalker(
         document.body,
         NodeFilter.SHOW_ELEMENT,
         {
             acceptNode: (node) => {
                 const tag = node.tagName.toLowerCase();
-                // "ignoring <script>, <style>, and hidden elements"
                 if (['script', 'style', 'noscript', 'meta', 'link', 'svg', 'path'].includes(tag)) return NodeFilter.FILTER_REJECT;
 
                 const style = window.getComputedStyle(node);
@@ -108,7 +106,6 @@ function parseDOM() {
         const el = walker.currentNode;
         const tag = el.tagName.toLowerCase();
 
-        // "Indexing: Assigns a unique Interaction ID to every interactive element (Inputs, Buttons, Links)."
         const isInteractive = (
             tag === 'a' ||
             tag === 'button' ||
@@ -124,17 +121,13 @@ function parseDOM() {
             const id = nextId++;
             interactables[id] = el;
             elementIds.push(id);
-            el.dataset.agentId = id; // Store for debugging
-
-            // "Compression: Converts the DOM into a simplified XML/Markdown schema"
+            el.dataset.agentId = id;
 
             let xml = `<${tag} id="${id}"`;
 
-            // Attributes
             if (el.value) xml += ` value="${redactPII(el.value)}"`;
             if (el.placeholder) xml += ` placeholder="${redactPII(el.placeholder)}"`;
 
-            // Try to find a label
             let labelText = el.getAttribute('aria-label') || el.getAttribute('name');
             if (!labelText && el.id) {
                 const labelEl = document.querySelector(`label[for="${el.id}"]`);
@@ -142,26 +135,22 @@ function parseDOM() {
             }
             if (labelText) xml += ` label="${redactPII(labelText)}"`;
 
-            // Redact href in Anchor tags (Review Feedback)
             if (tag === 'a' && el.href) {
                 try {
                     const url = new URL(el.href);
-                    // Just redact query string for safety
                     xml += ` href="${url.origin}${url.pathname}[REDACTED_QUERY]"`;
                 } catch(e) {
-                     // If invalid URL, just redact whole thing or ignore
                      xml += ` href="[INVALID_URL]"`;
                 }
             }
 
-            // Inner Text for containers
             let innerText = "";
             if (tag !== 'input' && tag !== 'textarea' && tag !== 'select') {
                 innerText = el.innerText.trim();
                 innerText = redactPII(innerText).substring(0, 50); // Truncate
             }
 
-            xml += `>`; // Close opening tag
+            xml += `>`;
 
             if (innerText) {
                 xml += `${innerText}`;
@@ -191,7 +180,7 @@ function checkChanges() {
         chrome.runtime.sendMessage({
             action: "TARGET_UPDATE",
             payload: payload,
-            elementIds: result.elementIds // Send IDs for optimization
+            elementIds: result.elementIds
         });
     }
 }
@@ -203,7 +192,22 @@ const observer = new MutationObserver(() => {
 });
 
 
-// --- 5. Message Listener ---
+// --- 5. User Interrupt Detection (V2.2) ---
+
+function handleUserInteraction() {
+    // Debounce interrupts to avoid flooding
+    if (this._interruptTimer) return;
+    this._interruptTimer = setTimeout(() => { this._interruptTimer = null; }, 1000);
+
+    console.log("[Target] User Interaction Detected. Sending Interrupt.");
+    chrome.runtime.sendMessage({ action: "USER_INTERRUPT" });
+}
+
+window.addEventListener('mousedown', handleUserInteraction, true);
+window.addEventListener('keydown', handleUserInteraction, true);
+
+
+// --- 6. Message Listener ---
 
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     if (msg.action === "INIT_TARGET") {
@@ -212,15 +216,13 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         observer.observe(document.body, { subtree: true, childList: true, attributes: true, characterData: true });
     }
 
-    // Phase 5: Coordinate Resolution
     if (msg.action === "GET_COORDINATES") {
-        const id = parseInt(msg.id); // Ensure int
+        const id = parseInt(msg.id);
         const el = interactables[id];
 
         if (el) {
             const rect = el.getBoundingClientRect();
             showGreenOutline(id);
-            // Return center
             sendResponse({
                 x: rect.left + (rect.width / 2),
                 y: rect.top + (rect.height / 2),

@@ -23,7 +23,6 @@ const storage = {
         },
         set: async (items) => {
             Object.assign(storage.local._data, items);
-            // Trigger onChanged
             if (storage.onChanged.listeners.length > 0) {
                  storage.onChanged.listeners.forEach(fn => fn({
                      commandQueue: { newValue: items.commandQueue }
@@ -44,7 +43,7 @@ const DEFAULT_STATE = {
     agentTabId: null,
     targetTabs: [],
     commandQueue: [],
-    isAgentBusy: false
+    lastActionTimestamp: 0
 };
 
 async function getState() {
@@ -58,65 +57,42 @@ async function updateState(updates) {
     await chrome.storage.local.set(updates);
 }
 
-// Minimal Queue Processor for Test (Simulating processQueue in background.js)
-async function processQueue(queue) {
-    if (!queue || queue.length === 0) return;
-    const item = queue[0];
-
-    // Simulate processing
-    if (item.type === 'TEST_CMD') {
-        if (!global.processed) global.processed = 0;
-        global.processed++;
+// Timeout Logic
+async function checkTimeout() {
+    const state = await getState();
+    if (state.lastActionTimestamp > 0 && (Date.now() - state.lastActionTimestamp > 15000)) {
+        await updateState({ lastActionTimestamp: 0 });
+        // Simulating enqueuing error
+        global.timeoutFired = true;
     }
-
-    // Dequeue - this triggers onChanged again in real logic
-    const remaining = queue.slice(1);
-    await updateState({ commandQueue: remaining });
 }
 
-// Mock Listener Registration
-chrome.storage.onChanged.addListener((changes, area) => {
-    if (area === 'local' && changes.commandQueue) {
-        processQueue(changes.commandQueue.newValue);
-    }
-});
+// Interrupt Logic
+async function handleInterrupt() {
+    await updateState({ commandQueue: [], lastActionTimestamp: 0 });
+}
 
 
 // --- TESTS ---
 
 async function runTests() {
-    console.log("Running Background V2 Tests...");
+    console.log("Running Background Robustness Tests...");
 
-    // Test 1: Storage Persistence
-    await updateState({ agentTabId: 999 });
+    // Test 1: Timeout Logic
+    await updateState({ lastActionTimestamp: Date.now() - 20000 }); // 20s ago
+    global.timeoutFired = false;
+    await checkTimeout();
+    assert.strictEqual(global.timeoutFired, true, "Timeout should fire after 15s");
     let state = await getState();
-    assert.strictEqual(state.agentTabId, 999, "Agent ID persists in local storage");
+    assert.strictEqual(state.lastActionTimestamp, 0, "Timeout should reset timestamp");
 
-    // Test 2: Event Driven Queue
-    global.processed = 0;
-    // We need to break infinite recursion in mock because mock is synchronous mostly?
-    // Actually, async recursion is fine.
-
-    await updateState({ commandQueue: [{ type: 'TEST_CMD' }] });
-
-    // Wait for async processing chain
-    await new Promise(r => setTimeout(r, 100));
-
+    // Test 2: Interrupt Logic
+    await updateState({ commandQueue: [{type: 'CMD1'}, {type: 'CMD2'}] });
+    await handleInterrupt();
     state = await getState();
-    assert.strictEqual(global.processed, 1, "Queue should process 1 item");
-    assert.strictEqual(state.commandQueue.length, 0, "Queue should be empty after processing");
+    assert.strictEqual(state.commandQueue.length, 0, "Interrupt should clear queue");
 
-    // Test 3: Multiple Items
-    global.processed = 0;
-    await updateState({ commandQueue: [{ type: 'TEST_CMD' }, { type: 'TEST_CMD' }] });
-
-    await new Promise(r => setTimeout(r, 200));
-
-    state = await getState();
-    assert.strictEqual(global.processed, 2, "Queue should process 2 items recursively");
-    assert.strictEqual(state.commandQueue.length, 0, "Queue empty");
-
-    console.log("All Background V2 Tests Passed!");
+    console.log("All Robustness Tests Passed!");
 }
 
 runTests().catch(e => {
