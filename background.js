@@ -1,59 +1,53 @@
-// The puppet master, pulling strings it cannot see.
-
-let agentTabId = null;
-let targetTabs = new Set();
+let agentTab = null;
+let activeTargets = new Set();
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  const tabId = sender.tab ? sender.tab.id : null;
+
   if (message.action === "ASSIGN_ROLE") {
-    handleRoleAssignment(message.role, message.tabId);
-    sendResponse({ status: "Role assigned. The die is cast." });
-  } else if (message.action === "AGENT_COMMAND") {
-    console.log(`Command received from Agent ${sender.tab.id}:`, message.payload);
-    dispatchCommandToTargets(message.payload);
-  } else if (message.action === "TARGET_UPDATE") {
-    console.log(`Update from Target ${sender.tab.id}. Feeding the beast.`);
-    relayUpdateToAgent(sender.tab.id, message.payload);
+    if (message.role === "AGENT") {
+      agentTab = message.tabId;
+      console.log(`Agent assigned: ${agentTab}`);
+    } else {
+      activeTargets.add(message.tabId);
+      console.log(`Target acquired: ${message.tabId}`);
+    }
+    return;
   }
-  return true; 
+
+  if (message.action === "AGENT_COMMAND") {
+    // message.payload should contain { targetTabId, ...cmd }
+    // If targetTabId is missing, broadcast to all (chaos mode)
+    if (message.payload.targetTabId) {
+      chrome.tabs.sendMessage(message.payload.targetTabId, {
+        action: "EXECUTE_COMMAND",
+        command: message.payload
+      });
+    } else {
+        // Broadcast to first available target if unspecified
+        const firstTarget = activeTargets.values().next().value;
+        if (firstTarget) {
+             chrome.tabs.sendMessage(firstTarget, {
+                action: "EXECUTE_COMMAND",
+                command: message.payload
+            });
+        }
+    }
+  }
+
+  if (message.action === "TARGET_UPDATE") {
+    if (agentTab) {
+      chrome.tabs.sendMessage(agentTab, {
+        action: "INJECT_OBSERVATION",
+        sourceId: tabId,
+        content: message.payload
+      });
+    }
+  }
 });
 
-function handleRoleAssignment(role, tabId) {
-  if (role === "AGENT") {
-    if (agentTabId && agentTabId !== tabId) {
-      // There can be only one Highlander.
-      chrome.tabs.sendMessage(agentTabId, { action: "DEMOTED" });
-    }
-    agentTabId = tabId;
-    targetTabs.delete(tabId); // An agent cannot inspect itself without going mad.
-    console.log(`Tab ${tabId} is now the Agent.`);
-  } else if (role === "TARGET") {
-    if (agentTabId === tabId) {
-      agentTabId = null;
-    }
-    targetTabs.add(tabId);
-    console.log(`Tab ${tabId} is now a Target. Poor thing.`);
-  }
-}
-
-function dispatchCommandToTargets(commandData) {
-  // commandData: { targetTabId: number, command: string, selector: string, value: string }
-  if (!commandData.targetTabId) return;
-
-  const targetId = parseInt(commandData.targetTabId);
-  if (targetTabs.has(targetId)) {
-    chrome.tabs.sendMessage(targetId, {
-      action: "EXECUTE_COMMAND",
-      command: commandData
-    });
-  }
-}
-
-function relayUpdateToAgent(sourceTabId, content) {
-  if (agentTabId) {
-    chrome.tabs.sendMessage(agentTabId, {
-      action: "INJECT_OBSERVATION",
-      sourceId: sourceTabId,
-      content: content
-    });
-  }
-}
+// Clean up if tabs close
+chrome.tabs.onRemoved.addListener((tabId) => {
+  if (agentTab === tabId) agentTab = null;
+  activeTargets.delete(tabId);
+});
