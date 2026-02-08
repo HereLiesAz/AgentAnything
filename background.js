@@ -23,6 +23,18 @@ async function updateState(updates) {
     await chrome.storage.session.set(updates);
 }
 
+// Safe Message Sender
+async function safeSendMessage(tabId, message) {
+    try {
+        await chrome.tabs.sendMessage(tabId, message);
+        return true;
+    } catch (e) {
+        // Suppress "Receiving end does not exist" which happens if tab is reloading or closed
+        console.log(`[System] Message to ${tabId} failed:`, e.message);
+        return false;
+    }
+}
+
 // Mutex for state synchronization
 let stateMutex = Promise.resolve();
 
@@ -117,13 +129,15 @@ ${item.content}
         console.log(`[Queue] Dispatching ${item.source}`);
     }
 
-    chrome.tabs.sendMessage(state.agentTabId, {
+    const success = await safeSendMessage(state.agentTabId, {
         action: "INJECT_PROMPT", 
         payload: finalPayload 
-    }).catch(async (err) => {
+    });
+
+    if (!success) {
         console.warn("Agent unreachable");
         await updateState({ isAgentBusy: false, busySince: 0 });
-    });
+    }
 }
 
 // --- SEQUENCER & MEMORY ---
@@ -165,6 +179,11 @@ async function handleUserPrompt(userText) {
     await addToQueue("USER", userText);
 }
 
+async function handleUserPrompt(userText) {
+    // Just queue the user prompt directly. Genesis should be pre-queued by ASSIGN_ROLE.
+    await addToQueue("USER", userText);
+}
+
 // --- MESSAGING ---
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   withLock(async () => {
@@ -173,9 +192,9 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
     if (msg.action === "HELLO" && senderTabId) {
         if (state.agentTabId === senderTabId) {
-            chrome.tabs.sendMessage(senderTabId, { action: "INIT_AGENT" });
+            safeSendMessage(senderTabId, { action: "INIT_AGENT" });
         } else if (state.targetTabIds.includes(senderTabId)) {
-            chrome.tabs.sendMessage(senderTabId, { action: "INIT_TARGET" });
+            safeSendMessage(senderTabId, { action: "INIT_TARGET" });
         }
         return;
     }
@@ -195,7 +214,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
             pendingGenesisPrompt: null
         });
 
-        chrome.tabs.sendMessage(targetId, { action: "INIT_AGENT" });
+        safeSendMessage(targetId, { action: "INIT_AGENT" });
 
         // Queue Genesis Instructions IMMEDIATELY
         await queueGenesisInstructions();
@@ -211,7 +230,14 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
             targetTabIds: newTargets
         });
 
-        chrome.tabs.sendMessage(targetId, { action: "INIT_TARGET" });
+        safeSendMessage(targetId, { action: "INIT_TARGET" });
+      }
+
+      // Check if both roles are assigned to trigger GENESIS MODE
+      const freshState = await getState();
+      if (freshState.agentTabId && freshState.targetTabIds.length > 0) {
+          console.log("[System] Both roles assigned. Triggering GENESIS MODE.");
+          safeSendMessage(freshState.agentTabId, { action: "GENESIS_MODE_ACTIVE" });
       }
 
       // Check if both roles are assigned to trigger GENESIS MODE
@@ -248,9 +274,8 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     if (msg.action === "AGENT_COMMAND") {
         // Collect all send promises
         const sendPromises = state.targetTabIds.map(tId =>
-            chrome.tabs.sendMessage(tId, { action: "EXECUTE_COMMAND", command: msg.payload })
-                .then(() => ({ id: tId, success: true }))
-                .catch(() => ({ id: tId, success: false }))
+            safeSendMessage(tId, { action: "EXECUTE_COMMAND", command: msg.payload })
+                .then(success => ({ id: tId, success }))
         );
 
         const results = await Promise.all(sendPromises);
@@ -276,13 +301,18 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     }
 
     if (msg.action === "DISENGAGE_ALL") {
-        if (state.agentTabId) chrome.tabs.sendMessage(state.agentTabId, { action: "DISENGAGE_LOCAL" }).catch(() => {});
-        state.targetTabIds.forEach(tId => chrome.tabs.sendMessage(tId, { action: "DISENGAGE_LOCAL" }).catch(() => {}));
+        if (state.agentTabId) safeSendMessage(state.agentTabId, { action: "DISENGAGE_LOCAL" });
+        state.targetTabIds.forEach(tId => safeSendMessage(tId, { action: "DISENGAGE_LOCAL" }));
 
         // Clear session storage; getState() will return defaults automatically
         await chrome.storage.session.clear();
         await chrome.storage.session.remove(Object.keys(DEFAULT_STATE));
         await updateState(DEFAULT_STATE);
+    }
+
+    // REMOTE_INJECT support for Popup
+    if (msg.action === "REMOTE_INJECT") {
+         await handleUserPrompt(msg.payload);
     }
 
     // REMOTE_INJECT support for Popup
