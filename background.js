@@ -68,7 +68,7 @@ async function processQueue(queue) {
     try {
         // V2: "The Service Worker processes the queue one item at a time."
         const item = queue[0];
-        if (!item) { isProcessing = false; return; }
+        if (!item) return;
 
         console.log(`[Queue] Processing: ${item.type}`);
 
