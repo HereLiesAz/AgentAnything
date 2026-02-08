@@ -1,18 +1,21 @@
 {
   "manifest_version": 3,
   "name": "AgentAnything",
-  "version": "0.9.2",
-  "description": "Remote Control. Trap Fixed.",
+  "version": "1.0.0",
+  "description": "Autonomous multi-agent browser orchestration.",
   "permissions": [
     "scripting",
     "tabs",
-    "storage"
+    "storage",
+    "offscreen",
+    "debugger"
   ],
   "host_permissions": [
     "<all_urls>"
   ],
   "background": {
-    "service_worker": "background.js"
+    "service_worker": "background.js",
+    "type": "module"
   },
   "action": {
     "default_popup": "popup.html",
@@ -31,8 +34,24 @@
   "content_scripts": [
     {
       "matches": ["<all_urls>"],
-      "js": ["heuristics.js", "content.js"],
-      "run_at": "document_start"
+      "js": ["content/target_adapter.js"],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": [
+        "https://chatgpt.com/*",
+        "https://claude.ai/*",
+        "https://gemini.google.com/*",
+        "https://aistudio.google.com/*"
+      ],
+      "js": ["content/agent_adapter.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": ["assets/*"],
+      "matches": ["<all_urls>"]
     }
   ]
 }
