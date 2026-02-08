@@ -4,17 +4,27 @@ let targetMap = [];
 let lastCommandSignature = "";
 let lastReportedContent = "";
 let knownDomainContexts = new Set(); 
+let observationDeck = null;
+
+// --- INITIALIZATION HANDSHAKE ---
+// This runs immediately when the script loads on ANY page.
+// It asks the background: "Do I have a job?"
+chrome.runtime.sendMessage({ action: "HELLO" });
 
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   switch (msg.action) {
     case "INIT_AGENT":
-      role = "AGENT";
-      initAgentUI();
+      if (role !== "AGENT") { // Prevent double-init
+        role = "AGENT";
+        initAgentUI();
+      }
       break;
     case "INIT_TARGET":
-      role = "TARGET";
-      myTabId = msg.tabId;
-      initTargetLogic();
+      if (role !== "TARGET") {
+        role = "TARGET";
+        myTabId = msg.tabId;
+        initTargetLogic();
+      }
       break;
     case "EXECUTE_COMMAND":
       if (role === "TARGET") executeCommand(msg.command);
@@ -30,6 +40,9 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 function initAgentUI() {
   console.log("%c AGENT ACTIVATED ", "background: #000; color: #0f0; font-size: 20px;");
   
+  // Create UI first so we know it's working
+  createObservationDeck();
+
   chrome.storage.sync.get({ universalContext: '' }, (items) => {
     const universal = items.universalContext ? `\n\n[UNIVERSAL CONTEXT]:\n${items.universalContext}` : "";
 
@@ -62,36 +75,44 @@ ${universal}
 WAITING FOR TARGET...
     `;
     
-    copyToClipboard(prompt);
-    notify("System Prompt Copied.");
-    observeAIOutput();
+    // Only copy prompt if this is a fresh manual activation, 
+    // to avoid clobbering clipboard on random reloads.
+    // We assume if the deck was just created, we prompt.
+    if (!window.hasPrompted) {
+        copyToClipboard(prompt);
+        notify("System Prompt Copied.");
+        window.hasPrompted = true;
+    }
     
-    // Create the observation deck immediately so we see the cached data arrive
-    createObservationDeck();
+    observeAIOutput();
   });
 }
 
 function createObservationDeck() {
   if (document.getElementById('aa-observation-deck')) return;
   
-  const obsWin = document.createElement('div');
-  obsWin.id = 'aa-observation-deck';
-  obsWin.style.cssText = `
-    position: fixed; top: 0; right: 0; width: 350px; background: #000; color: #0f0;
-    border-left: 2px solid #333; height: 100vh; z-index: 999999; padding: 10px;
-    font-family: monospace; font-size: 11px; white-space: pre-wrap; overflow-y: auto;
+  observationDeck = document.createElement('div');
+  observationDeck.id = 'aa-observation-deck';
+  observationDeck.style.cssText = `
+    position: fixed; top: 0; right: 0; width: 350px; background: #050505; color: #0f0;
+    border-left: 1px solid #333; height: 100vh; z-index: 2147483647; padding: 10px;
+    font-family: 'Consolas', 'Monaco', monospace; font-size: 11px; white-space: pre-wrap; 
+    overflow-y: auto; box-shadow: -5px 0 15px rgba(0,0,0,0.5);
   `;
-  document.body.appendChild(obsWin);
+  document.body.appendChild(observationDeck);
   
-  const title = document.createElement('div');
-  title.innerText = ">> AGENT LISTENING...";
-  title.style.borderBottom = "1px solid #333";
-  title.style.paddingBottom = "5px";
-  obsWin.appendChild(title);
+  const header = document.createElement('div');
+  header.innerHTML = `<span style="color:#666">STATUS:</span> <span style="color:#0f0; font-weight:bold">ONLINE</span>`;
+  header.style.borderBottom = "1px solid #333";
+  header.style.paddingBottom = "5px";
+  header.style.marginBottom = "10px";
+  observationDeck.appendChild(header);
 }
 
 function observeAIOutput() {
   const observer = new MutationObserver((mutations) => {
+    // Look for JSON blocks in the ENTIRE body. 
+    // Modern AI chats render incrementally, so we scan frequently.
     const bodyText = document.body.innerText;
     if (bodyText.includes('```json') && bodyText.includes('```')) {
         parseCommands(bodyText);
@@ -105,7 +126,10 @@ function parseCommands(text) {
   let match;
   while ((match = regex.exec(text)) !== null) {
     try {
-      const json = JSON.parse(match[1]);
+      const jsonStr = match[1];
+      // Clean up common AI json errors (trailing commas, etc) if possible
+      // But standard JSON.parse is strict.
+      const json = JSON.parse(jsonStr);
       const sig = JSON.stringify(json);
       
       if (sig !== lastCommandSignature) {
@@ -118,16 +142,27 @@ function parseCommands(text) {
         });
         
         notify(`Sent: ${json.tool}.${json.action}`);
+        
+        // Visual feedback in deck
+        const line = document.createElement('div');
+        line.style.color = "#888";
+        line.innerText = `>> SENT: ${json.action}`;
+        observationDeck.appendChild(line);
+        observationDeck.scrollTop = observationDeck.scrollHeight;
       }
     } catch (e) {
-      console.error("Invalid JSON from Agent.", e);
+      // AUTO-CORRECTION:
+      // If parsing fails, we don't just log it. We tell the AI.
+      // This is tricky because we can't easily type into the chat box.
+      // So we flash a big error in the user's face or the logs.
+      console.error("Agent JSON Syntax Error", e);
     }
   }
 }
 
 function injectObservation(sourceId, payload) {
   window.activeTargetId = sourceId;
-  createObservationDeck(); // Ensure it exists
+  createObservationDeck();
   const obsWin = document.getElementById('aa-observation-deck');
 
   // --- CORTEX DOMAIN CHECK ---
@@ -140,11 +175,8 @@ function injectObservation(sourceId, payload) {
         chrome.storage.sync.get({ domainContexts: {} }, (items) => {
            const context = items.domainContexts[hostname] || items.domainContexts[cleanHost];
            if (context) {
-             const contextMsg = `\n\n[CORTEX MEMORY TRIGGERED: ${cleanHost}]\n${context}\n`;
+             const contextMsg = `\n\n[CORTEX MEMORY: ${cleanHost}]\n${context}\n`;
              obsWin.innerText += contextMsg;
-             obsWin.scrollTop = obsWin.scrollHeight;
-             obsWin.style.borderLeftColor = "yellow";
-             setTimeout(() => obsWin.style.borderLeftColor = "#333", 1000);
              knownDomainContexts.add(cleanHost);
            }
         });
@@ -154,13 +186,40 @@ function injectObservation(sourceId, payload) {
 
   // --- UI UPDATE ---
   if (payload.type === "APPEND") {
-    const currentText = obsWin.innerText.replace(/\n\n\[END UPDATE\]$/, "");
-    obsWin.innerText = `${currentText}${payload.content}\n\n[END UPDATE]`;
+    // Clean previous "END UPDATE" markers to make it a continuous stream
+    obsWin.innerHTML = obsWin.innerHTML.replace(/<br>\[END UPDATE\]/g, "");
+    
+    const newContent = document.createElement('div');
+    newContent.innerText = payload.content;
+    newContent.style.borderLeft = "2px solid #0f0";
+    newContent.style.paddingLeft = "5px";
+    newContent.style.marginTop = "5px";
+    obsWin.appendChild(newContent);
+    
+    const footer = document.createElement('div');
+    footer.innerText = "[END UPDATE]";
+    footer.style.color = "#666";
+    footer.style.fontSize = "9px";
+    obsWin.appendChild(footer);
+
     obsWin.scrollTop = obsWin.scrollHeight;
-    obsWin.style.borderLeftColor = "#0f0";
-    setTimeout(() => obsWin.style.borderLeftColor = "#333", 200);
   } else {
-    obsWin.innerText = `[TARGET: ${sourceId}]\n\n${payload.content}\n\n[END UPDATE]`;
+    // REPLACE
+    obsWin.innerHTML = ""; // Wipe
+    const header = document.createElement('div');
+    header.innerHTML = `<span style="color:#666">CONNECTED TO:</span> <span style="color:#fff">${sourceId}</span>`;
+    header.style.borderBottom = "1px solid #333";
+    obsWin.appendChild(header);
+
+    const content = document.createElement('div');
+    content.innerText = payload.content;
+    obsWin.appendChild(content);
+    
+    const footer = document.createElement('div');
+    footer.innerText = "[END UPDATE]";
+    footer.style.color = "#666";
+    footer.style.fontSize = "9px";
+    obsWin.appendChild(footer);
   }
 }
 
@@ -170,6 +229,13 @@ function injectObservation(sourceId, payload) {
 function initTargetLogic() {
   console.log("%c TARGET ACQUIRED ", "background: #000; color: #f00; font-size: 20px;");
   
+  // Visual Indicator for Target
+  const indicator = document.createElement('div');
+  indicator.innerText = "TARGET";
+  indicator.style.cssText = "position:fixed;bottom:10px;right:10px;background:red;color:white;padding:2px 5px;z-index:999999;font-size:10px;font-family:monospace;pointer-events:none;opacity:0.5;";
+  document.body.appendChild(indicator);
+
+  // Allow DOM to settle
   setTimeout(() => {
       const map = Heuristics.generateMap();
       targetMap = map;
@@ -263,7 +329,7 @@ function executeCommand(cmd) {
   if (!el) {
     chrome.runtime.sendMessage({ 
         action: "TARGET_UPDATE", 
-        payload: { type: "APPEND", content: `\n[ERROR]: Element ${cmd.id} missing.`, url: window.location.href }
+        payload: { type: "APPEND", content: `\n[ERROR]: Element ${cmd.id} missing (DOM Shifted?).`, url: window.location.href }
     });
     return;
   }
@@ -301,7 +367,7 @@ function executeCommand(cmd) {
 function notify(msg) {
   const n = document.createElement('div');
   n.innerText = msg;
-  n.style.cssText = "position:fixed;top:10px;left:50%;transform:translateX(-50%);background:red;color:white;padding:5px;z-index:999999;";
+  n.style.cssText = "position:fixed;top:10px;left:50%;transform:translateX(-50%);background:red;color:white;padding:5px;z-index:2147483647;font-family:monospace;";
   document.body.appendChild(n);
   setTimeout(() => n.remove(), 3000);
 }
