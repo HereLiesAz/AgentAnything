@@ -36,11 +36,38 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   }
 });
 
+// --- UI COMPONENT: THE GLASS WALL ---
+function erectGlassWall() {
+    if (document.getElementById('aa-glass-wall')) return;
+    
+    const wall = document.createElement('div');
+    wall.id = 'aa-glass-wall';
+    wall.style.cssText = `
+        position: fixed; top: 0; left: 0; width: 100vw; height: 100vh;
+        background: transparent;
+        z-index: 2147483640; /* Below Deck, Above Page */
+        cursor: not-allowed;
+    `;
+    
+    // Stop all events from reaching the page
+    ['click', 'mousedown', 'mouseup', 'keydown', 'keyup', 'keypress'].forEach(evt => {
+        wall.addEventListener(evt, (e) => {
+            e.stopPropagation();
+            e.preventDefault();
+        }, true);
+    });
+    
+    document.body.appendChild(wall);
+    console.log("AgentAnything: Glass Wall Erected. Interaction Blocked.");
+}
+
 // --- AGENT LOGIC ---
 
 function initAgentUI() {
   console.log("%c AGENT ACTIVATED ", "background: #000; color: #0f0; font-size: 20px;");
-  createObservationDeck();
+  
+  erectGlassWall();
+  createObservationDeck(true); // true = enable input
 
   chrome.storage.sync.get({ universalContext: '' }, (items) => {
     const universal = items.universalContext ? `\n\n[UNIVERSAL CONTEXT]:\n${items.universalContext}` : "";
@@ -75,6 +102,7 @@ ${universal}
     `;
     
     if (!window.hasInitialized) {
+        // Auto-inject System Prompt immediately
         queueMessage(prompt);
         window.hasInitialized = true;
     }
@@ -83,24 +111,78 @@ ${universal}
   });
 }
 
-function createObservationDeck() {
+function createObservationDeck(enableInput) {
   if (document.getElementById('aa-observation-deck')) return;
   
   observationDeck = document.createElement('div');
   observationDeck.id = 'aa-observation-deck';
   observationDeck.style.cssText = `
-    position: fixed; top: 0; right: 0; width: 300px; background: #050505; color: #0f0;
+    position: fixed; top: 0; right: 0; width: 350px; background: #050505; color: #0f0;
     border-left: 1px solid #333; height: 100vh; z-index: 2147483647; padding: 10px;
-    font-family: 'Consolas', 'Monaco', monospace; font-size: 10px; white-space: pre-wrap; 
-    overflow-y: auto; opacity: 0.9; pointer-events: none;
+    font-family: 'Consolas', 'Monaco', monospace; font-size: 11px; display: flex; flex-direction: column;
+    box-shadow: -5px 0 20px rgba(0,0,0,0.8);
   `;
+
+  // Log Area
+  const logArea = document.createElement('div');
+  logArea.id = 'aa-log-area';
+  logArea.style.cssText = "flex: 1; overflow-y: auto; white-space: pre-wrap; padding-bottom: 10px; scrollbar-width: none;";
+  observationDeck.appendChild(logArea);
+
+  // Input Area (Agent Only)
+  if (enableInput) {
+      const inputContainer = document.createElement('div');
+      inputContainer.style.cssText = "border-top: 1px solid #333; padding-top: 10px; display: flex; gap: 5px;";
+      
+      const input = document.createElement('input');
+      input.id = 'aa-master-input';
+      input.placeholder = "Command the Agent...";
+      input.style.cssText = "flex: 1; background: #111; color: #fff; border: 1px solid #333; padding: 5px; font-family: inherit;";
+      
+      const btn = document.createElement('button');
+      btn.innerText = "SEND";
+      btn.style.cssText = "background: #0f0; color: #000; border: none; padding: 5px 10px; cursor: pointer; font-weight: bold;";
+      
+      // Send Logic
+      const handleSend = () => {
+          const val = input.value.trim();
+          if (val) {
+              // Log to deck
+              const userMsg = document.createElement('div');
+              userMsg.style.color = "#fff";
+              userMsg.style.borderBottom = "1px solid #333";
+              userMsg.innerText = `[USER]: ${val}`;
+              logArea.appendChild(userMsg);
+              logArea.scrollTop = logArea.scrollHeight;
+              
+              // Queue for injection
+              queueMessage(val);
+              input.value = "";
+          }
+      };
+
+      btn.onclick = handleSend;
+      input.onkeydown = (e) => { if (e.key === 'Enter') handleSend(); };
+      
+      // Block event propagation so typing here doesn't trigger page hotkeys
+      input.addEventListener('keydown', e => e.stopPropagation());
+      input.addEventListener('keyup', e => e.stopPropagation());
+      input.addEventListener('keypress', e => e.stopPropagation());
+
+      inputContainer.appendChild(input);
+      inputContainer.appendChild(btn);
+      observationDeck.appendChild(inputContainer);
+      
+      // Focus our input, not the page's
+      setTimeout(() => input.focus(), 500);
+  }
+
   document.body.appendChild(observationDeck);
 }
 
 function observeAIOutput() {
   const observer = new MutationObserver((mutations) => {
     const bodyText = document.body.innerText;
-    // Optimized trigger: only parse if we see the start of a code block
     if (bodyText.match(/```/)) {
         parseCommands(bodyText);
     }
@@ -109,25 +191,18 @@ function observeAIOutput() {
 }
 
 function parseCommands(text) {
-  // Regex captures content between ```json (optional) and ```
   const regex = /```(?:json)?\s*(\{[\s\S]*?\})\s*```/gi;
   let match;
 
   while ((match = regex.exec(text)) !== null) {
     let rawJson = match[1];
-    
     try {
-      // 1. First Attempt: Strict JSON
       const json = JSON.parse(rawJson);
       dispatchIfNew(json);
     } catch (e) {
-      console.warn("AgentAnything: Strict JSON parse failed. Attempting sanitization...", e);
-      
       try {
-        // 2. Second Attempt: Sanitize "Dirty" JSON (e.g. unquoted keys)
         const cleanJson = sanitizeJson(rawJson);
         const json = JSON.parse(cleanJson);
-        console.log("AgentAnything: Sanitization successful.");
         dispatchIfNew(json);
       } catch (e2) {
         console.error("AgentAnything: FATAL JSON ERROR.", e2);
@@ -138,15 +213,10 @@ function parseCommands(text) {
 
 function sanitizeJson(str) {
   return str
-    // Remove comments //...
     .replace(/\/\/.*$/gm, '') 
-    // Remove comments /*...*/
     .replace(/\/\*[\s\S]*?\*\//g, '') 
-    // Fix single quotes to double
     .replace(/'/g, '"') 
-    // Quote unquoted keys (e.g., key: "value" -> "key": "value")
     .replace(/([{,]\s*)([a-zA-Z0-9_]+?)\s*:/g, '$1"$2":')
-    // Remove trailing commas
     .replace(/,\s*}/g, '}')
     .replace(/,\s*]/g, ']');
 }
@@ -162,12 +232,13 @@ function dispatchIfNew(json) {
       payload: { ...json, targetTabId: window.activeTargetId } 
     });
     
-    if (observationDeck) {
+    const logArea = document.getElementById('aa-log-area');
+    if (logArea) {
         const line = document.createElement('div');
         line.style.color = "#888";
         line.innerText = `>> COMMAND SENT: ${json.action}`;
-        observationDeck.appendChild(line);
-        observationDeck.scrollTop = observationDeck.scrollHeight;
+        logArea.appendChild(line);
+        logArea.scrollTop = logArea.scrollHeight;
     }
   }
 }
@@ -176,7 +247,7 @@ function dispatchIfNew(json) {
 
 function injectObservation(sourceId, payload) {
   window.activeTargetId = sourceId;
-  createObservationDeck();
+  createObservationDeck(true);
   
   updateVisualDeck(payload);
 
@@ -215,11 +286,6 @@ function processQueue() {
     });
 }
 
-/**
- * THE HARDENED STEALTH INJECTOR
- * - Uses Heuristics.findBestInput() to pierce Shadow DOMs.
- * - Dispatches 'beforeinput', 'input', 'change' events.
- */
 function stealthTypeAndSend(text, retries = 0, callback) {
     const input = Heuristics.findBestInput();
     
@@ -231,12 +297,14 @@ function stealthTypeAndSend(text, retries = 0, callback) {
             return;
         }
         
-        // Fallback: visual alert to user
-        const alert = document.createElement('div');
-        alert.innerText = "⚠️ AgentAnything: PLEASE FOCUS CHAT INPUT";
-        alert.style.cssText = "position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);background:red;color:white;padding:20px;z-index:9999999;";
-        document.body.appendChild(alert);
-        setTimeout(() => alert.remove(), 3000);
+        // Alert in the Deck, not the page
+        const logArea = document.getElementById('aa-log-area');
+        if (logArea) {
+            const err = document.createElement('div');
+            err.style.color = "red";
+            err.innerText = "FATAL: CANNOT FIND AI INPUT BOX.";
+            logArea.appendChild(err);
+        }
         
         if (callback) callback();
         return;
@@ -244,6 +312,8 @@ function stealthTypeAndSend(text, retries = 0, callback) {
 
     // 1. SET VALUE
     try {
+        // Temporarily bypass the glass wall for programmatic focus
+        // We don't remove the wall, just assume scripts can bypass pointer-events
         input.focus();
         
         // React/Vue Value Setter Bypass
@@ -256,19 +326,16 @@ function stealthTypeAndSend(text, retries = 0, callback) {
 
         if (nativeSetter) {
             const currentVal = input.value;
-            // Only append if not already present (prevents duplication loops)
             if (!currentVal.endsWith(text)) {
                  const newVal = currentVal ? currentVal + "\n" + text : text;
                  nativeSetter.call(input, newVal);
             }
         } else {
-            // ContentEditable fallback
             if (!input.innerText.endsWith(text)) {
                 input.innerText = input.innerText + "\n" + text;
             }
         }
         
-        // Dispatch specific event sequence
         const events = ['beforeinput', 'input', 'change'];
         events.forEach(eventType => {
             input.dispatchEvent(new Event(eventType, { bubbles: true, cancelable: true }));
@@ -295,20 +362,30 @@ function stealthTypeAndSend(text, retries = 0, callback) {
 }
 
 function updateVisualDeck(payload) {
+    const logArea = document.getElementById('aa-log-area');
+    if (!logArea) return;
+
     if (payload.type === "APPEND") {
         const div = document.createElement('div');
         div.innerText = payload.content;
         div.style.borderLeft = "2px solid #0f0";
         div.style.marginTop = "5px";
         div.style.paddingLeft = "5px";
-        observationDeck.appendChild(div);
+        div.style.opacity = "0.7";
+        logArea.appendChild(div);
     } else {
-        observationDeck.innerHTML = `<div style="color:#666;border-bottom:1px solid #333">CONNECTED TO: ${payload.url}</div>`;
+        const header = document.createElement('div');
+        header.style.cssText = "color:#666;border-bottom:1px solid #333;margin-top:10px;";
+        header.innerText = `CONNECTED TO: ${payload.url}`;
+        logArea.appendChild(header);
+
         const div = document.createElement('div');
         div.innerText = payload.content;
-        observationDeck.appendChild(div);
+        div.style.fontSize = "9px";
+        div.style.opacity = "0.5";
+        logArea.appendChild(div);
     }
-    observationDeck.scrollTop = observationDeck.scrollHeight;
+    logArea.scrollTop = logArea.scrollHeight;
 }
 
 
@@ -317,9 +394,11 @@ function updateVisualDeck(payload) {
 function initTargetLogic() {
   console.log("%c TARGET ACQUIRED ", "background: #000; color: #f00; font-size: 20px;");
   
+  erectGlassWall(); // Targets are seen, not touched.
+
   const indicator = document.createElement('div');
-  indicator.innerText = "TARGET";
-  indicator.style.cssText = "position:fixed;bottom:10px;right:10px;background:red;color:white;padding:2px 5px;z-index:999999;font-size:10px;font-family:monospace;pointer-events:none;opacity:0.5;";
+  indicator.innerText = "TARGET LOCKED";
+  indicator.style.cssText = "position:fixed;bottom:10px;right:10px;background:red;color:white;padding:5px 10px;z-index:2147483647;font-size:12px;font-family:monospace;pointer-events:none;box-shadow: 0 0 10px red;";
   document.body.appendChild(indicator);
 
   setTimeout(() => {
