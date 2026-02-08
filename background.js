@@ -1,12 +1,10 @@
 // STATE MANAGEMENT
-// We now use chrome.storage.session to survive Service Worker termination.
-// No global variables are used for critical state.
+// Uses chrome.storage.session to maintain state across Service Worker restarts.
 
-// --- 0. THE WAKE UP CALL (AUTO-INJECTION ON INSTALL) ---
+// --- INITIALIZATION ---
 chrome.runtime.onInstalled.addListener(async () => {
-  console.log("AgentAnything Installed. Waking up all tabs...");
+  console.log("[System] Extension installed. Initializing...");
   
-  // Initialize Session Storage
   await chrome.storage.session.set({ 
       agentTabId: null, 
       targetTabIds: [], 
@@ -18,70 +16,59 @@ chrome.runtime.onInstalled.addListener(async () => {
   
   for (const cs of manifest.content_scripts) {
     const tabs = await chrome.tabs.query({url: cs.matches});
-    
     for (const tab of tabs) {
       if (!tab.url || tab.url.startsWith("chrome://") || tab.url.startsWith("edge://") || tab.url.startsWith("about:") || tab.url.startsWith("view-source:")) {
         continue;
       }
-      
       try {
         await chrome.scripting.executeScript({
           target: {tabId: tab.id},
           files: cs.js,
         });
-        console.log(`Injected scripts into existing tab: ${tab.id} (${tab.url})`);
+        console.log(`[System] Script injected: ${tab.id}`);
       } catch (e) {
-        console.warn(`Could not inject into tab ${tab.id}: ${e.message}`);
+        console.warn(`[System] Injection failed for ${tab.id}: ${e.message}`);
       }
     }
   }
 });
 
-// --- 1. THE HANDSHAKE (Auto-Reconnect) ---
+// --- MESSAGE ROUTING ---
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-  // Async IIFE to handle storage calls
   (async () => {
     const tabId = sender.tab ? sender.tab.id : null;
-    
-    // Retrieve current state
     const store = await chrome.storage.session.get(['agentTabId', 'targetTabIds', 'lastTargetPayload', 'lastTargetSourceId']);
     const targetTabIds = new Set(store.targetTabIds || []);
 
-    // A tab has loaded/reloaded and is asking "Who am I?"
+    // Reconnection Handshake
     if (message.action === "HELLO" && tabId) {
       if (tabId === store.agentTabId) {
-        console.log(`Restoring AGENT: ${tabId}`);
         chrome.tabs.sendMessage(tabId, { action: "INIT_AGENT" });
-        // If we have a target waiting, deliver it immediately
         if (store.lastTargetPayload && store.lastTargetSourceId) {
           setTimeout(() => {
             chrome.tabs.sendMessage(tabId, {
-              action: "INJECT_OBSERVATION",
+              action: "INJECT_UPDATE",
               sourceId: store.lastTargetSourceId,
               payload: store.lastTargetPayload
             });
           }, 500);
         }
       } else if (targetTabIds.has(tabId)) {
-        console.log(`Restoring TARGET: ${tabId}`);
         chrome.tabs.sendMessage(tabId, { action: "INIT_TARGET", tabId: tabId });
       }
       return;
     }
 
-    // --- 2. ROLE ASSIGNMENT (User Clicked Button) ---
+    // Role Assignment
     if (message.action === "ASSIGN_ROLE") {
       if (message.role === "AGENT") {
         await chrome.storage.session.set({ agentTabId: message.tabId });
         targetTabIds.delete(message.tabId); 
         await chrome.storage.session.set({ targetTabIds: Array.from(targetTabIds) });
         
-        console.log(`Agent assigned: ${message.tabId}`);
-        
-        // Immediate delivery of cached target
         if (store.lastTargetPayload && store.lastTargetSourceId) {
           chrome.tabs.sendMessage(message.tabId, {
-            action: "INJECT_OBSERVATION",
+            action: "INJECT_UPDATE",
             sourceId: store.lastTargetSourceId,
             payload: store.lastTargetPayload
           });
@@ -90,16 +77,14 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         targetTabIds.add(message.tabId);
         await chrome.storage.session.set({ targetTabIds: Array.from(targetTabIds) });
         
-        // If this tab was the agent, clear it
         if (store.agentTabId === message.tabId) {
             await chrome.storage.session.set({ agentTabId: null });
         }
-        console.log(`Target acquired: ${message.tabId}`);
       }
       return;
     }
 
-    // --- 3. AGENT COMMANDS ---
+    // Agent Commands
     if (message.action === "AGENT_COMMAND") {
       const targetId = message.payload.targetTabId || store.lastTargetSourceId;
       if (!targetId) return;
@@ -114,15 +99,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       }
     }
 
-    // --- 4. TARGET UPDATES (With Deduplication) ---
+    // Target Updates
     if (message.action === "TARGET_UPDATE") {
-      // Deduplication: If payload is identical to last stored, ignore.
       const newPayloadStr = JSON.stringify(message.payload);
       const oldPayloadStr = JSON.stringify(store.lastTargetPayload);
 
-      if (newPayloadStr === oldPayloadStr) {
-          return; 
-      }
+      if (newPayloadStr === oldPayloadStr) return; 
 
       await chrome.storage.session.set({ 
           lastTargetPayload: message.payload,
@@ -131,7 +113,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
       if (store.agentTabId) {
         chrome.tabs.sendMessage(store.agentTabId, {
-          action: "INJECT_OBSERVATION",
+          action: "INJECT_UPDATE",
           sourceId: tabId,
           payload: message.payload
         });
@@ -139,24 +121,16 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     }
   })();
   
-  return true; // Keep message channel open for async response
+  return true;
 });
 
-// --- BROWSER CONTROL ---
+// --- BROWSER ACTIONS ---
 function handleBrowserAction(tabId, cmd) {
   switch (cmd.action) {
-    case "refresh":
-      chrome.tabs.reload(tabId);
-      break;
-    case "back":
-      chrome.tabs.goBack(tabId);
-      break;
-    case "forward":
-      chrome.tabs.goForward(tabId);
-      break;
-    case "close":
-      chrome.tabs.remove(tabId);
-      break;
+    case "refresh": chrome.tabs.reload(tabId); break;
+    case "back": chrome.tabs.goBack(tabId); break;
+    case "forward": chrome.tabs.goForward(tabId); break;
+    case "close": chrome.tabs.remove(tabId); break;
     case "find":
         chrome.tabs.sendMessage(tabId, {
             action: "EXECUTE_COMMAND",
