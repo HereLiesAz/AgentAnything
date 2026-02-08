@@ -12,4 +12,12 @@ document.addEventListener('DOMContentLoaded', async () => {
     chrome.tabs.sendMessage(tab.id, { action: "INIT_TARGET", tabId: tab.id });
     window.close();
   };
+
+  document.getElementById('btn-options').onclick = () => {
+    if (chrome.runtime.openOptionsPage) {
+      chrome.runtime.openOptionsPage();
+    } else {
+      window.open(chrome.runtime.getURL('options.html'));
+    }
+  };
 });
