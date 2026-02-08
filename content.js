@@ -4,6 +4,7 @@ let targetMap = [];
 let lastCommandSignature = "";
 let knownDomainContexts = new Set(); 
 let uiPanel = null;
+let inputGuardActive = false;
 
 // --- MESSAGE QUEUE ---
 let messageQueue = [];
@@ -36,33 +37,45 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   }
 });
 
-// --- UI: INPUT GUARD ---
-function enableInputLock() {
-    if (document.getElementById('aa-input-lock')) return;
+// --- UI: EVENT-BASED INPUT GUARD ---
+// Blocks interaction but allows scrolling.
+function enableInputGuard() {
+    if (inputGuardActive) return;
+    inputGuardActive = true;
     
-    const lock = document.createElement('div');
-    lock.id = 'aa-input-lock';
-    lock.style.cssText = `
-        position: fixed; top: 0; left: 0; width: 100vw; height: 100vh;
-        background: transparent;
-        z-index: 2147483640; 
-        cursor: default;
-    `;
+    const blockEvent = (e) => {
+        // ALLOW: Events inside our own Interface Panel
+        if (e.target.closest('#aa-interface')) return;
+
+        // BLOCK: Everything else interacting with the page content
+        e.stopPropagation();
+        e.preventDefault();
+    };
     
-    ['click', 'mousedown', 'mouseup', 'keydown', 'keyup', 'keypress'].forEach(evt => {
-        lock.addEventListener(evt, (e) => {
-            e.stopPropagation();
-            e.preventDefault();
-        }, true);
+    // We capture these events at the Window level before they reach elements
+    const captureEvents = ['click', 'mousedown', 'mouseup', 'keydown', 'keyup', 'keypress', 'focus', 'submit'];
+    
+    captureEvents.forEach(evt => {
+        window.addEventListener(evt, blockEvent, true); // true = capture phase
     });
+
+    // Visual Indicator that input is locked
+    const badge = document.createElement('div');
+    badge.innerText = "🔒 AGENT CONTROL";
+    badge.style.cssText = `
+        position: fixed; top: 10px; right: 10px; 
+        background: #2e3440; color: #88c0d0; padding: 4px 8px; 
+        border: 1px solid #4c566a; border-radius: 4px;
+        font-family: monospace; font-size: 10px; pointer-events: none; z-index: 2147483647;
+    `;
+    document.body.appendChild(badge);
     
-    document.body.appendChild(lock);
+    console.log("[System] Input Guard Active. Scroll allowed, Interaction blocked.");
 }
 
 // --- AGENT INTERFACE ---
 
 function initAgent() {
-  enableInputLock();
   createInterface(true); 
 
   chrome.storage.sync.get({ universalContext: '' }, (items) => {
@@ -97,8 +110,12 @@ ${universal}
     `;
     
     if (!window.hasInitialized) {
+        // We delay the guard until we actually start working
         queueMessage(systemPrompt);
         window.hasInitialized = true;
+        
+        // Activate Guard after a short delay to ensure setup is done
+        setTimeout(enableInputGuard, 2000);
     }
     
     observeAgentOutput();
@@ -162,11 +179,10 @@ function createInterface(enableInput) {
 
       input.onkeydown = (e) => { 
           if (e.key === 'Enter') handleSend(); 
+          // Stop propagation so hitting Enter doesn't trigger anything on the page
           e.stopPropagation();
       };
-      // Prevent key leaks
-      ['keyup', 'keypress'].forEach(evt => input.addEventListener(evt, e => e.stopPropagation()));
-
+      
       inputContainer.appendChild(input);
       uiPanel.appendChild(inputContainer);
       
@@ -238,7 +254,7 @@ function dispatchIfNew(json) {
   }
 }
 
-// --- QUEUE & INJECTION ---
+// --- QUEUE & VISUAL INJECTION ---
 
 function injectUpdate(sourceId, payload) {
   window.activeTargetId = sourceId;
@@ -273,35 +289,36 @@ function processQueue() {
     isProcessingQueue = true;
     const text = messageQueue.shift();
 
-    stealthTypeAndSend(text, 0, () => {
+    visualTypeAndSend(text, 0, () => {
         isProcessingQueue = false;
-        setTimeout(processQueue, 1500); 
+        setTimeout(processQueue, 1000); 
     });
 }
 
-function stealthTypeAndSend(text, retries = 0, callback) {
+// VISUAL TYPING ENGINE
+async function visualTypeAndSend(text, retries = 0, callback) {
     const input = Heuristics.findBestInput();
     
     if (!input) {
         if (retries < 5) {
-            setTimeout(() => stealthTypeAndSend(text, retries + 1, callback), 1000);
+            setTimeout(() => visualTypeAndSend(text, retries + 1, callback), 1000);
             return;
-        }
-        
-        const logArea = document.getElementById('aa-log-area');
-        if (logArea) {
-            const err = document.createElement('div');
-            err.style.color = "#bf616a";
-            err.innerText = "Error: Input field not found.";
-            logArea.appendChild(err);
         }
         if (callback) callback();
         return;
     }
 
     try {
+        // 1. Visually Scroll to Input
+        input.scrollIntoView({ behavior: "smooth", block: "center" });
         input.focus();
         
+        // 2. Ghost Typing Effect
+        let currentVal = input.value || input.innerText || "";
+        // Ensure separation from previous text
+        if (currentVal.length > 0 && !currentVal.endsWith('\n')) currentVal += "\n";
+        
+        // React/Vue Setter Helper
         let nativeSetter;
         if (input instanceof HTMLTextAreaElement) {
             nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, "value").set;
@@ -309,18 +326,23 @@ function stealthTypeAndSend(text, retries = 0, callback) {
             nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value").set;
         }
 
-        if (nativeSetter) {
-            const currentVal = input.value;
-            if (!currentVal.endsWith(text)) {
-                 const newVal = currentVal ? currentVal + "\n" + text : text;
-                 nativeSetter.call(input, newVal);
+        // Type character by character
+        for (let i = 0; i < text.length; i++) {
+            currentVal += text[i];
+            
+            if (nativeSetter) {
+                nativeSetter.call(input, currentVal);
+            } else {
+                input.innerText = currentVal;
             }
-        } else {
-            if (!input.innerText.endsWith(text)) {
-                input.innerText = input.innerText + "\n" + text;
-            }
+            
+            input.dispatchEvent(new Event('input', { bubbles: true }));
+            
+            // Fast typing speed (10-20ms per char)
+            await new Promise(r => setTimeout(r, 10)); 
         }
-        
+
+        // Final event dispatch to ensure state commits
         ['beforeinput', 'input', 'change'].forEach(evt => {
             input.dispatchEvent(new Event(evt, { bubbles: true, cancelable: true }));
         });
@@ -329,6 +351,7 @@ function stealthTypeAndSend(text, retries = 0, callback) {
         console.error("Injection failed", e);
     }
 
+    // 3. Send
     setTimeout(() => {
         const sendBtn = Heuristics.findSendButton();
         if (sendBtn && !sendBtn.disabled) {
@@ -338,7 +361,7 @@ function stealthTypeAndSend(text, retries = 0, callback) {
             input.dispatchEvent(new KeyboardEvent('keyup', { bubbles: true, keyCode: 13, key: 'Enter' }));
         }
         if (callback) callback();
-    }, 800);
+    }, 500);
 }
 
 function updateLog(payload) {
@@ -363,7 +386,7 @@ function updateLog(payload) {
 // --- TARGET LOGIC ---
 
 function initTarget() {
-  enableInputLock();
+  enableInputGuard(); // Block interaction on Target too
 
   const indicator = document.createElement('div');
   indicator.innerText = "LINKED";
@@ -404,21 +427,38 @@ ${contentNode.innerText.substring(0, 5000)}
   }, 1000);
 }
 
+// VISUAL ACTION EXECUTION
 function executeCommand(cmd) {
     if (cmd.tool === "interact") {
         const el = document.querySelector(`[data-aa-id="${cmd.id}"]`);
         if (el) {
-            if (cmd.action === "click") el.click();
-            if (cmd.action === "type") {
-                el.value = cmd.value;
-                el.dispatchEvent(new Event('input', {bubbles:true}));
-            }
+            // 1. Scroll & Highlight
+            el.scrollIntoView({ behavior: "smooth", block: "center" });
+            
+            const originalTransition = el.style.transition;
+            const originalOutline = el.style.outline;
+            
+            el.style.transition = "outline 0.2s";
+            el.style.outline = "3px solid #a3be8c"; // Action Green
+            
+            // 2. Wait 500ms for user to see
             setTimeout(() => {
+                if (cmd.action === "click") el.click();
+                if (cmd.action === "type") {
+                    el.value = cmd.value;
+                    el.dispatchEvent(new Event('input', {bubbles:true}));
+                }
+                
+                // Cleanup Highlight
+                el.style.outline = originalOutline;
+                el.style.transition = originalTransition;
+                
+                // Report back
                 chrome.runtime.sendMessage({
                   action: "TARGET_UPDATE",
                   payload: { type: "APPEND", content: `OK: ${cmd.action} -> ${cmd.id}` }
                 });
-            }, 500);
+            }, 600);
         }
     } else if (cmd.tool === "browser" && cmd.action === "find") {
         const found = window.find(cmd.value);
