@@ -1,8 +1,8 @@
+// hereliesaz/agentanything/AgentAnything-05c5b6fc4348e667e2769e1a2345ae1bf3bde566/content.js
 let role = null;
 let myTabId = null;
 let targetMap = [];
 let lastCommandSignature = "";
-let lastReportedContent = "";
 let knownDomainContexts = new Set(); 
 let observationDeck = null;
 
@@ -101,7 +101,8 @@ function createObservationDeck() {
 function observeAIOutput() {
   const observer = new MutationObserver((mutations) => {
     const bodyText = document.body.innerText;
-    if (bodyText.includes('```json') && bodyText.includes('```')) {
+    // Optimized regex trigger to reduce processing load
+    if (bodyText.match(/```(?:json)?/i)) {
         parseCommands(bodyText);
     }
   });
@@ -109,8 +110,11 @@ function observeAIOutput() {
 }
 
 function parseCommands(text) {
-  const regex = /```json\s*(\{[\s\S]*?\})\s*```/g;
+  // Hardened Regex: Case insensitive, optional 'json' label, greedy matching
+  const regex = /```(?:json)?\s*(\{[\s\S]*?\})\s*```/gi;
   let match;
+  let foundValidCommand = false;
+
   while ((match = regex.exec(text)) !== null) {
     try {
       const json = JSON.parse(match[1]);
@@ -130,9 +134,12 @@ function parseCommands(text) {
         line.innerText = `>> COMMAND SENT: ${json.action}`;
         observationDeck.appendChild(line);
         observationDeck.scrollTop = observationDeck.scrollHeight;
+        foundValidCommand = true;
       }
     } catch (e) {
       console.error("Agent JSON Syntax Error", e);
+      // We do NOT queue an error here to avoid loops on partial typing, 
+      // but we could if the block is definitely "closed" but invalid.
     }
   }
 }
@@ -149,7 +156,7 @@ function injectObservation(sourceId, payload) {
   if (payload.type === "APPEND") {
     aiMessage = `\n[TARGET UPDATE]:\n${payload.content}`;
   } else {
-    // Check Cortex Memory
+    // Check Cortex Memory for domains
     if (payload.url) {
         try {
             const hostname = new URL(payload.url).hostname.replace(/^www\./, '');
@@ -182,12 +189,14 @@ function processQueue() {
 }
 
 /**
- * THE HARDENED STEALTH INJECTOR
- * Supports TextArea, Input, and ContentEditable.
- * Includes Retry Logic if input is missing (loading state).
+ * THE HARDENED STEALTH INJECTOR (V2)
+ * - Uses Heuristics.findBestInput() to pierce Shadow DOMs.
+ * - Dispatches 'beforeinput', 'input', 'change' events for React/Vue.
+ * - Finds send buttons via aria-labels and icons.
  */
 function stealthTypeAndSend(text, retries = 0, callback) {
-    const input = document.querySelector('textarea, input[type="text"], [contenteditable="true"], [role="textbox"]');
+    // We rely on Heuristics to find the input across Shadow Boundaries
+    const input = Heuristics.findBestInput();
     
     // RETRY LOGIC
     if (!input) {
@@ -196,16 +205,25 @@ function stealthTypeAndSend(text, retries = 0, callback) {
             setTimeout(() => stealthTypeAndSend(text, retries + 1, callback), 1000);
             return;
         }
-        console.warn("AgentAnything: Could not find chat input box after retries.");
+        console.error("AgentAnything: FATAL - Could not find AI input box.");
+        
+        // Fallback: visual alert to user
+        const alert = document.createElement('div');
+        alert.innerText = "⚠️ AgentAnything: PLEASE FOCUS CHAT INPUT";
+        alert.style.cssText = "position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);background:red;color:white;padding:20px;z-index:9999999;";
+        document.body.appendChild(alert);
+        setTimeout(() => alert.remove(), 3000);
+        
         if (callback) callback();
         return;
     }
 
-    // 1. SET VALUE (Stealthily - No Focus)
+    // 1. SET VALUE (Stealthily)
     try {
-        let nativeSetter;
+        input.focus();
         
-        // Detect element type to use correct prototype
+        // React/Vue Value Setter Bypass
+        let nativeSetter;
         if (input instanceof HTMLTextAreaElement) {
             nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, "value").set;
         } else if (input instanceof HTMLInputElement) {
@@ -214,42 +232,42 @@ function stealthTypeAndSend(text, retries = 0, callback) {
 
         if (nativeSetter) {
             const currentVal = input.value;
-            const newVal = currentVal ? currentVal + "\n" + text : text;
-            nativeSetter.call(input, newVal);
+            // Prevent duplication if we are retrying
+            if (!currentVal.endsWith(text)) {
+                 const newVal = currentVal ? currentVal + "\n" + text : text;
+                 nativeSetter.call(input, newVal);
+            }
         } else {
             // ContentEditable fallback
-            input.innerText = text;
+            if (!input.innerText.endsWith(text)) {
+                input.innerText = input.innerText + "\n" + text;
+            }
         }
         
-        // Dispatch events to trigger framework state updates
-        input.dispatchEvent(new Event('input', { bubbles: true }));
-        input.dispatchEvent(new Event('change', { bubbles: true }));
+        // Dispatch specific event sequence for modern frameworks
+        const events = ['beforeinput', 'input', 'change'];
+        events.forEach(eventType => {
+            input.dispatchEvent(new Event(eventType, { bubbles: true, cancelable: true }));
+        });
+        
     } catch (e) {
         console.error("AgentAnything: Input Injection Failed", e);
     }
 
     // 2. TRIGGER SEND
     setTimeout(() => {
-        const sendBtn = document.querySelector('button[aria-label="Send"], button[data-testid="send-button"], button[aria-label="Submit"]');
+        const sendBtn = Heuristics.findSendButton();
         
         if (sendBtn && !sendBtn.disabled) {
             sendBtn.click();
         } else {
-            // Fallback: Full Enter Key Sequence
-            ['keydown', 'keypress', 'keyup'].forEach(type => {
-                input.dispatchEvent(new KeyboardEvent(type, {
-                    bubbles: true, 
-                    cancelable: true, 
-                    keyCode: 13, 
-                    key: 'Enter',
-                    code: 'Enter',
-                    which: 13
-                }));
-            });
+            // Fallback: Enter Key
+            input.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, cancelable: true, keyCode: 13, key: 'Enter' }));
+            input.dispatchEvent(new KeyboardEvent('keyup', { bubbles: true, cancelable: true, keyCode: 13, key: 'Enter' }));
         }
         
         if (callback) callback();
-    }, 500);
+    }, 800);
 }
 
 function updateVisualDeck(payload) {
@@ -270,7 +288,7 @@ function updateVisualDeck(payload) {
 }
 
 
-// --- TARGET LOGIC (THE BODY) ---
+// --- TARGET LOGIC ---
 
 function initTargetLogic() {
   console.log("%c TARGET ACQUIRED ", "background: #000; color: #f00; font-size: 20px;");
@@ -281,11 +299,7 @@ function initTargetLogic() {
   document.body.appendChild(indicator);
 
   setTimeout(() => {
-      // Safety check: ensure Heuristics is loaded
-      if (typeof Heuristics === 'undefined') {
-          console.error("AgentAnything: Heuristics library missing!");
-          return;
-      }
+      if (typeof Heuristics === 'undefined') return;
 
       const map = Heuristics.generateMap();
       targetMap = map;
@@ -303,4 +317,38 @@ ELEMENTS:
 ${toolSchema}
 
 CONTENT:
-${contentNode.innerText.substring(
+${contentNode.innerText.substring(0, 5000)}
+`;
+    chrome.runtime.sendMessage({
+      action: "TARGET_UPDATE",
+      payload: { type: "FULL", content: fullReport, url: window.location.href }
+    });
+
+  }, 1000);
+}
+
+function executeCommand(cmd) {
+    if (cmd.tool === "interact") {
+        const el = document.querySelector(`[data-aa-id="${cmd.id}"]`);
+        if (el) {
+            if (cmd.action === "click") el.click();
+            if (cmd.action === "type") {
+                el.value = cmd.value;
+                el.dispatchEvent(new Event('input', {bubbles:true}));
+            }
+            // Report back
+            setTimeout(() => {
+                chrome.runtime.sendMessage({
+                  action: "TARGET_UPDATE",
+                  payload: { type: "APPEND", content: `Action ${cmd.action} performed on ${cmd.id}.` }
+                });
+            }, 500);
+        }
+    } else if (cmd.tool === "browser" && cmd.action === "find") {
+        const found = window.find(cmd.value);
+        chrome.runtime.sendMessage({
+            action: "TARGET_UPDATE",
+            payload: { type: "APPEND", content: `Text search for '${cmd.value}': ${found ? "FOUND" : "NOT FOUND"}` }
+        });
+    }
+}
