@@ -7,6 +7,7 @@ let bootInterval = null;
 let activeInput = null; 
 let isWaitingForGenesisInput = true;
 let cachedSendButton = null;
+let cachedInput = null;
 
 // --- BOOTSTRAPPER ---
 function boot() {
@@ -147,12 +148,13 @@ function initAgent() {
         ));
 
         if (btn) {
-            // Cache the button during Genesis for reliable re-injection
+            // Cache the button AND input during Genesis for reliable re-injection
+            const input = activeInput || Heuristics.findBestInput();
+
             if (isWaitingForGenesisInput) {
                 cachedSendButton = btn;
+                cachedInput = input;
             }
-
-            const input = activeInput || Heuristics.findBestInput();
             const val = input ? (input.value || input.innerText) : "";
             
             if (val && val.trim().length > 0) {
@@ -214,7 +216,7 @@ function triggerInterception(text, inputEl) {
 
 function injectAgentPrompt(text) {
     const Heuristics = window.AA_Heuristics;
-    const input = Heuristics.findBestInput();
+    const input = cachedInput || Heuristics.findBestInput();
     
     if (!input) {
         console.error("Input not found");
