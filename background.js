@@ -19,11 +19,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     const targetId = message.payload.targetTabId || activeTargets.values().next().value;
     if (!targetId) return;
 
-    // INTERCEPT BROWSER COMMANDS
     if (message.payload.tool === "browser") {
       handleBrowserAction(targetId, message.payload);
     } else {
-      // Forward DOM commands to content script
       chrome.tabs.sendMessage(targetId, {
         action: "EXECUTE_COMMAND",
         command: message.payload
@@ -36,14 +34,13 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       chrome.tabs.sendMessage(agentTab, {
         action: "INJECT_OBSERVATION",
         sourceId: tabId,
-        content: message.payload
+        payload: message.payload // Note: updated to pass 'payload' object
       });
     }
   }
 });
 
 function handleBrowserAction(tabId, cmd) {
-  // Commands that require privileged chrome API access
   switch (cmd.action) {
     case "refresh":
       chrome.tabs.reload(tabId);
@@ -58,7 +55,6 @@ function handleBrowserAction(tabId, cmd) {
       chrome.tabs.remove(tabId);
       break;
     case "find":
-        // "Find" requires DOM access, so we bounce it back to the content script
         chrome.tabs.sendMessage(tabId, {
             action: "EXECUTE_COMMAND",
             command: cmd
@@ -67,7 +63,6 @@ function handleBrowserAction(tabId, cmd) {
   }
 }
 
-// Clean up if tabs close
 chrome.tabs.onRemoved.addListener((tabId) => {
   if (agentTab === tabId) agentTab = null;
   activeTargets.delete(tabId);
