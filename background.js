@@ -1,17 +1,36 @@
 // STATE MANAGEMENT
 let agentTabId = null;
 let targetTabIds = new Set();
-// The Mailbox: Stores the last known state of the active target to feed new agents
+// The Mailbox: Stores the last known state of the active target
 let lastTargetPayload = null;
 let lastTargetId = null;
 
-// --- EVENT LISTENERS ---
+// --- 0. THE WAKE UP CALL (AUTO-INJECTION ON INSTALL) ---
+chrome.runtime.onInstalled.addListener(async () => {
+  console.log("AgentAnything Installed. Waking up all tabs...");
+  
+  for (const cs of chrome.runtime.getManifest().content_scripts) {
+    for (const tab of await chrome.tabs.query({url: cs.matches})) {
+      if (tab.url.startsWith("chrome://") || tab.url.startsWith("edge://") || tab.url.startsWith("about:")) continue;
+      
+      try {
+        chrome.scripting.executeScript({
+          target: {tabId: tab.id},
+          files: cs.js,
+        });
+        console.log(`Injected scripts into existing tab: ${tab.id}`);
+      } catch (e) {
+        console.warn(`Could not inject into tab ${tab.id}:`, e);
+      }
+    }
+  }
+});
 
-// 1. THE HANDSHAKE (Auto-Reconnect)
+// --- 1. THE HANDSHAKE (Auto-Reconnect) ---
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   const tabId = sender.tab ? sender.tab.id : null;
 
-  // A tab has loaded and is asking "Who am I?"
+  // A tab has loaded/reloaded and is asking "Who am I?"
   if (message.action === "HELLO" && tabId) {
     if (tabId === agentTabId) {
       console.log(`Restoring AGENT: ${tabId}`);
@@ -33,7 +52,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return;
   }
 
-  // 2. ROLE ASSIGNMENT (User Clicked Button)
+  // --- 2. ROLE ASSIGNMENT (User Clicked Button) ---
   if (message.action === "ASSIGN_ROLE") {
     if (message.role === "AGENT") {
       agentTabId = message.tabId;
@@ -56,7 +75,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return;
   }
 
-  // 3. AGENT COMMANDS
+  // --- 3. AGENT COMMANDS ---
   if (message.action === "AGENT_COMMAND") {
     const targetId = message.payload.targetTabId || lastTargetId;
     if (!targetId) return;
@@ -71,7 +90,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     }
   }
 
-  // 4. TARGET UPDATES
+  // --- 4. TARGET UPDATES ---
   if (message.action === "TARGET_UPDATE") {
     lastTargetPayload = message.payload;
     lastTargetId = tabId;
