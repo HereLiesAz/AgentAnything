@@ -26,11 +26,8 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       if (role === "TARGET") executeCommand(msg.command);
       break;
     case "INJECT_UPDATE":
-      // If we receive an update, simply log it if possible
       if (role === "AGENT") {
-         console.log("[AgentAnything] Target Update Received:", msg.payload);
-         // You could append this to the chat if the lock isn't active, 
-         // but for Trap & Swap we mostly care about the next prompt.
+         console.log("[AgentAnything] Target Update Received");
       }
       break;
     case "DISENGAGE_LOCAL":
@@ -45,21 +42,16 @@ function initAgent() {
   console.log("[System] Agent Armed. Waiting for user input...");
   showStatusBadge("🕵️ AGENT ARMED: Type & Submit normally");
   
-  // Arm the trap to catch the user's prompt
   armAgentTrap();
-  
-  // Start observing output so we catch the response when it comes
   observeAgentOutput();
 }
 
 function armAgentTrap() {
-    // Capture events at window level
     window.addEventListener('keydown', handleKeyTrap, true);
     window.addEventListener('click', handleClickTrap, true);
 }
 
 function handleKeyTrap(e) {
-    // Intercept Enter key (without Shift)
     if (e.key === 'Enter' && !e.shiftKey) {
         const target = e.target;
         if (target.matches('input, textarea, [contenteditable="true"], [role="textbox"]')) {
@@ -72,13 +64,14 @@ function handleKeyTrap(e) {
 }
 
 function handleClickTrap(e) {
-    // Intercept clicks on submit buttons
-    const target = e.target.closest('button, [role="button"], input[type="submit"]');
+    // Robust selector for clicking send buttons/icons
+    const target = e.target.closest('button, [role="button"], input[type="submit"], [data-testid*="send"], svg');
+    
     if (target) {
-        // Find the input box associated with this interaction
         const input = Heuristics.findBestInput(); 
-        if (input && input.value !== "") {
-            console.log("[System] Trap Triggered by CLICK");
+        // We only trap if there is text in the input
+        if (input && (input.value || input.innerText)) {
+            console.log("[System] Trap Triggered by CLICK on", target);
             e.preventDefault();
             e.stopPropagation();
             executeTrapAndSwap(input, target);
@@ -133,23 +126,41 @@ ${userPrompt}
     setNativeValue(inputElement, ""); 
     await visualType(inputElement, finalPayload);
 
-    // 5. SUBMIT
+    // 5. SUBMIT (THE SWAP)
     showStatusBadge("🚀 LAUNCHING AGENT...");
     
     setTimeout(() => {
+        let sent = false;
+
+        // PATH A: Button Click was trapped
         if (buttonElement) {
-            // Bypass guard for this specific click
-            const clickEvent = new MouseEvent('click', {
-                view: window,
-                bubbles: true,
-                cancelable: true
-            });
-            buttonElement.dispatchEvent(clickEvent);
-        } else {
-            // Fire Enter
+            // Resurrection Check: Is the button still valid?
+            let targetBtn = buttonElement;
+            if (!buttonElement.isConnected) {
+                console.warn("[System] Trapped button is dead. Hunting for replacement...");
+                const freshBtn = Heuristics.findSendButton();
+                if (freshBtn) targetBtn = freshBtn;
+            }
+
+            if (targetBtn && targetBtn.isConnected) {
+                console.log("[System] Firing Nuclear Click on", targetBtn);
+                const opts = { view: window, bubbles: true, cancelable: true, buttons: 1 };
+                targetBtn.dispatchEvent(new MouseEvent('mousedown', opts));
+                targetBtn.dispatchEvent(new MouseEvent('mouseup', opts));
+                targetBtn.dispatchEvent(new MouseEvent('click', opts));
+                sent = true;
+            }
+        }
+
+        // PATH B: Fallback / Enter Key
+        if (!sent) {
+            console.log("[System] Firing Enter Key Fallback");
             const keyConfig = { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true, cancelable: true };
             inputElement.dispatchEvent(new KeyboardEvent('keydown', keyConfig));
             inputElement.dispatchEvent(new KeyboardEvent('keyup', keyConfig));
+            
+            // Native Form Submit Try
+            if (inputElement.form) inputElement.form.requestSubmit ? inputElement.form.requestSubmit() : inputElement.form.submit();
         }
     }, 500);
 }
@@ -174,6 +185,7 @@ function setNativeValue(element, value) {
 
 async function visualType(input, text) {
     setNativeValue(input, text);
+    // Wake up framework state listeners
     ['beforeinput', 'input', 'change'].forEach(evt => {
         input.dispatchEvent(new Event(evt, { bubbles: true }));
     });
@@ -255,6 +267,7 @@ function dispatchIfNew(json) {
       action: "AGENT_COMMAND", 
       payload: { ...json, targetTabId: window.activeTargetId } 
     });
+    showStatusBadge(`⚙️ EXEC: ${json.action} on ${json.id}`);
   }
 }
 
