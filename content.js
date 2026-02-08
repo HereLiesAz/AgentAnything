@@ -179,6 +179,9 @@ function initAgent() {
             if (val && val.trim().length > 0) {
                 e.preventDefault(); e.stopPropagation(); e.stopImmediatePropagation();
                 triggerInterception(val, input);
+            } else if (isWaitingForGenesisInput) {
+                e.preventDefault(); e.stopPropagation(); e.stopImmediatePropagation();
+                setStatus("TYPE COMMAND FIRST", "red");
             }
         }
     }, true);
