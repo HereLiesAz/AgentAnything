@@ -3,9 +3,7 @@ let myTabId = null;
 let targetMap = [];
 let lastCommandSignature = "";
 let lastReportedContent = "";
-let knownDomainContexts = new Set(); // Track which contexts we've already shown
-
-// --- Messaging Architecture ---
+let knownDomainContexts = new Set(); 
 
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   switch (msg.action) {
@@ -27,12 +25,11 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   }
 });
 
-// --- AGENT LOGIC (The Puppet Master) ---
+// --- AGENT LOGIC ---
 
 function initAgentUI() {
   console.log("%c AGENT ACTIVATED ", "background: #000; color: #0f0; font-size: 20px;");
   
-  // Fetch Universal Context from Cortex
   chrome.storage.sync.get({ universalContext: '' }, (items) => {
     const universal = items.universalContext ? `\n\n[UNIVERSAL CONTEXT]:\n${items.universalContext}` : "";
 
@@ -66,9 +63,31 @@ WAITING FOR TARGET...
     `;
     
     copyToClipboard(prompt);
-    notify("System Prompt (w/ Cortex Memory) Copied.");
+    notify("System Prompt Copied.");
     observeAIOutput();
+    
+    // Create the observation deck immediately so we see the cached data arrive
+    createObservationDeck();
   });
+}
+
+function createObservationDeck() {
+  if (document.getElementById('aa-observation-deck')) return;
+  
+  const obsWin = document.createElement('div');
+  obsWin.id = 'aa-observation-deck';
+  obsWin.style.cssText = `
+    position: fixed; top: 0; right: 0; width: 350px; background: #000; color: #0f0;
+    border-left: 2px solid #333; height: 100vh; z-index: 999999; padding: 10px;
+    font-family: monospace; font-size: 11px; white-space: pre-wrap; overflow-y: auto;
+  `;
+  document.body.appendChild(obsWin);
+  
+  const title = document.createElement('div');
+  title.innerText = ">> AGENT LISTENING...";
+  title.style.borderBottom = "1px solid #333";
+  title.style.paddingBottom = "5px";
+  obsWin.appendChild(title);
 }
 
 function observeAIOutput() {
@@ -108,51 +127,29 @@ function parseCommands(text) {
 
 function injectObservation(sourceId, payload) {
   window.activeTargetId = sourceId;
-  let obsWin = document.getElementById('aa-observation-deck');
-  if (!obsWin) {
-    obsWin = document.createElement('div');
-    obsWin.id = 'aa-observation-deck';
-    obsWin.style.cssText = `
-      position: fixed; top: 0; right: 0; width: 350px; background: #000; color: #0f0;
-      border-left: 2px solid #333; height: 100vh; z-index: 999999; padding: 10px;
-      font-family: monospace; font-size: 11px; white-space: pre-wrap; overflow-y: auto;
-    `;
-    document.body.appendChild(obsWin);
-  }
+  createObservationDeck(); // Ensure it exists
+  const obsWin = document.getElementById('aa-observation-deck');
 
   // --- CORTEX DOMAIN CHECK ---
-  // We check if the payload contains a URL (Target reports it)
-  // If so, we check our memory for specific instructions for this domain.
   if (payload.url) {
     try {
       const hostname = new URL(payload.url).hostname;
-      // Also remove 'www.' for cleaner matching
       const cleanHost = hostname.replace(/^www\./, '');
       
       if (!knownDomainContexts.has(cleanHost)) {
         chrome.storage.sync.get({ domainContexts: {} }, (items) => {
-           // Check for exact match or 'clean' match
            const context = items.domainContexts[hostname] || items.domainContexts[cleanHost];
-           
            if (context) {
              const contextMsg = `\n\n[CORTEX MEMORY TRIGGERED: ${cleanHost}]\n${context}\n`;
-             
-             // Inject into visual deck
              obsWin.innerText += contextMsg;
              obsWin.scrollTop = obsWin.scrollHeight;
-             
-             // Copy to clipboard automatically? 
-             // No, that overrides the prompt. We'll just flash it yellow.
              obsWin.style.borderLeftColor = "yellow";
              setTimeout(() => obsWin.style.borderLeftColor = "#333", 1000);
-             
              knownDomainContexts.add(cleanHost);
            }
         });
       }
-    } catch (e) {
-      // URL parsing failed, ignore
-    }
+    } catch (e) {}
   }
 
   // --- UI UPDATE ---
@@ -160,17 +157,15 @@ function injectObservation(sourceId, payload) {
     const currentText = obsWin.innerText.replace(/\n\n\[END UPDATE\]$/, "");
     obsWin.innerText = `${currentText}${payload.content}\n\n[END UPDATE]`;
     obsWin.scrollTop = obsWin.scrollHeight;
-    
     obsWin.style.borderLeftColor = "#0f0";
     setTimeout(() => obsWin.style.borderLeftColor = "#333", 200);
   } else {
-    // Full Replace
     obsWin.innerText = `[TARGET: ${sourceId}]\n\n${payload.content}\n\n[END UPDATE]`;
   }
 }
 
 
-// --- TARGET LOGIC (The Tool) ---
+// --- TARGET LOGIC ---
 
 function initTargetLogic() {
   console.log("%c TARGET ACQUIRED ", "background: #000; color: #f00; font-size: 20px;");
@@ -197,7 +192,6 @@ ${contentNode.innerText.substring(0, 1000)}
 
       lastReportedContent = contentNode.innerText;
       
-      // Send URL in payload so Agent can do Cortex lookup
       chrome.runtime.sendMessage({ 
         action: "TARGET_UPDATE", 
         payload: { type: "REPLACE", content: fullReport, url: window.location.href } 
