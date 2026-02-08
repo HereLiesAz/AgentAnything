@@ -158,15 +158,6 @@ async function queueGenesisInstructions() {
     if (contextBlock) {
         await addToQueue("CORTEX_MEMORY", contextBlock);
     }
-
-    if (contextBlock) {
-        await addToQueue("CORTEX_MEMORY", contextBlock);
-    }
-}
-
-async function handleUserPrompt(userText) {
-    // Just queue the user prompt directly. Genesis should be pre-queued by ASSIGN_ROLE.
-    await addToQueue("USER", userText);
 }
 
 async function handleUserPrompt(userText) {
@@ -288,10 +279,15 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         if (state.agentTabId) chrome.tabs.sendMessage(state.agentTabId, { action: "DISENGAGE_LOCAL" }).catch(() => {});
         state.targetTabIds.forEach(tId => chrome.tabs.sendMessage(tId, { action: "DISENGAGE_LOCAL" }).catch(() => {}));
 
-        await updateState(DEFAULT_STATE);
+        // Clear session storage; getState() will return defaults automatically
         await chrome.storage.session.clear();
         await chrome.storage.session.remove(Object.keys(DEFAULT_STATE));
         await updateState(DEFAULT_STATE);
+    }
+
+    // REMOTE_INJECT support for Popup
+    if (msg.action === "REMOTE_INJECT") {
+         await handleUserPrompt(msg.payload);
     }
 
     // REMOTE_INJECT support for Popup

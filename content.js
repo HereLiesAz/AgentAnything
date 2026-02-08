@@ -133,26 +133,20 @@ function activateGenesisMode() {
     }, 500); // Poll every 500ms until captured
 
     // Disable Enter Key during Genesis to force click
-    window.addEventListener('keydown', (e) => {
-        if (isWaitingForGenesisInput && e.key === 'Enter') {
-            e.preventDefault();
-            e.stopPropagation();
-            setStatus("USE MOUSE TO CLICK SEND", "red");
-        }
-    }, true);
+    window.addEventListener('keydown', handleGenesisKeydown, true);
+}
+
+function handleGenesisKeydown(e) {
+    if (isWaitingForGenesisInput && e.key === 'Enter') {
+        e.preventDefault();
+        e.stopPropagation();
+        setStatus("USE MOUSE TO CLICK SEND", "red");
+    }
 }
 
 function initAgent() {
     setStatus("AGENT: ASSIGNED", "blue");
     const Heuristics = window.AA_Heuristics;
-
-    window.addEventListener('focus', (e) => {
-        if (['INPUT','TEXTAREA'].includes(e.target.tagName) || e.target.isContentEditable) {
-            activeInput = e.target;
-            // Maintain highlight if in genesis mode
-            if (isWaitingForGenesisInput) e.target.style.outline = "3px solid #00ff00";
-        }
-    }, true);
 
     window.addEventListener('focus', (e) => {
         if (['INPUT','TEXTAREA'].includes(e.target.tagName) || e.target.isContentEditable) {
@@ -221,6 +215,9 @@ function triggerInterception(text, inputEl) {
         setStatus("GENESIS PROMPT CAPTURED", "neon");
         inputEl.style.outline = ""; // Remove green outline immediately
         isWaitingForGenesisInput = false; // Lock UX
+
+        // Clean up Genesis listeners
+        window.removeEventListener('keydown', handleGenesisKeydown, true);
 
         // Disable interactions except scrolling
         const style = document.createElement('style');
