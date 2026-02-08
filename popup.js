@@ -8,27 +8,27 @@ document.addEventListener('DOMContentLoaded', async () => {
     const btnTarget = document.getElementById('btn-target');
     const btnInject = document.getElementById('btn-inject');
     const btnKill = document.getElementById('btn-kill');
+    const roleIndicator = document.getElementById('role-indicator');
 
     // 1. CHECK STATE
     const store = await chrome.storage.session.get(['agentTabId', 'targetTabIds']);
     const hasAgent = !!store.agentTabId;
     const hasTarget = store.targetTabIds && store.targetTabIds.length > 0;
     
-    // STRICT GATEKEEPING: Only show Active View if BOTH are ready
+    // STRICT GATEKEEPING
     if (hasAgent && hasTarget) {
         viewSetup.style.display = 'none';
         viewActive.style.display = 'block';
+        roleIndicator.innerText = `[${store.targetTabIds.length} Targets]`;
     } else {
         viewSetup.style.display = 'block';
         viewActive.style.display = 'none';
         
-        // Update Setup Buttons to show progress
+        // Update Setup Buttons
         if (hasAgent) {
             btnAgent.innerText = "AGENT ASSIGNED ✅";
             btnAgent.classList.add('btn-done');
-            btnAgent.disabled = true; // Prevent re-assigning to avoid confusion
-            
-            // Visual cue to go find a target
+            btnAgent.disabled = true;
             btnTarget.classList.add('btn-pulse');
         }
         
@@ -52,7 +52,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         window.close();
     };
 
-    // 4. REMOTE INJECT (The Sidecar)
+    // 4. REMOTE INJECT
     btnInject.onclick = async () => {
         const text = txtInput.value.trim();
         if (!text || !store.agentTabId) return;
@@ -63,23 +63,24 @@ document.addEventListener('DOMContentLoaded', async () => {
         chrome.tabs.sendMessage(store.agentTabId, { 
             action: "REMOTE_INJECT", 
             payload: text 
-        }, () => {
-            btnInject.innerText = "SENT";
-            txtInput.value = "";
-            setTimeout(() => { 
-                btnInject.disabled = false; 
-                btnInject.innerText = "SEND COMMAND"; 
-            }, 1000);
+        }).catch(err => {
+             console.error("Injection Failed", err);
+             btnInject.innerText = "FAILED (Check Console)";
         });
+
+        setTimeout(() => { 
+            btnInject.disabled = false; 
+            btnInject.innerText = "SEND COMMAND"; 
+            txtInput.value = "";
+        }, 1000);
     };
 
     // 5. DISENGAGE
     const handleDisengage = () => {
         chrome.runtime.sendMessage({ action: "DISENGAGE_ALL" });
-        location.reload();
+        setTimeout(() => window.close(), 500);
     };
 
     btnKill.onclick = handleDisengage;
-    // Add a reset button to setup view in case user gets stuck
     document.getElementById('btn-reset-setup').onclick = handleDisengage;
 });
