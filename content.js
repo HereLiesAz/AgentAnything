@@ -3,9 +3,9 @@ let myTabId = null;
 let lastCommandSignature = "";
 let inputGuardActive = false;
 
-// --- ELEMENT CACHE (The Recorder) ---
-let cachedInput = null;
-let cachedButton = null;
+// --- REAL-TIME CACHE ---
+let draftText = "";
+let activeInput = null;
 
 // --- INITIALIZATION ---
 chrome.runtime.sendMessage({ action: "HELLO" });
@@ -43,96 +43,105 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 // --- AGENT LOGIC ---
 
 function initAgent() {
-  console.log("[System] Agent Armed. Trap Active.");
-  showStatusBadge("AGENT ARMED: Type in chat OR use Popup");
+  console.log("[System] Agent Armed. Monitor Active.");
+  showStatusBadge("AGENT ARMED: Type & CLICK SEND");
+  
+  startInputMonitor();
   armAgentTrap();
   observeAgentOutput();
 }
 
-// 1. THE TRAP (Local Interaction & Recording)
-function armAgentTrap() {
-    // Use Capture Phase to intercept events before the page sees them
-    window.addEventListener('keydown', handleKeyTrap, true);
-    window.addEventListener('click', handleClickTrap, true);
+// 1. INPUT MONITOR (Passive)
+function startInputMonitor() {
+    window.addEventListener('input', (e) => {
+        if (!e.isTrusted) return;
+
+        const target = e.target;
+        if (target.matches && target.matches('input, textarea, [contenteditable="true"], [role="textbox"]')) {
+            activeInput = target;
+            draftText = target.value || target.innerText || "";
+        }
+    }, true);
+    
+    window.addEventListener('focus', (e) => {
+        const target = e.target;
+        if (target.matches && target.matches('input, textarea, [contenteditable="true"], [role="textbox"]')) {
+            activeInput = target;
+        }
+    }, true);
 }
 
-function handleKeyTrap(e) {
-    // Ignore script-generated events
-    if (!e.isTrusted) return; 
+// 2. THE TRAP (Aggressive)
+function armAgentTrap() {
+    // We intercept Keydown to BLOCK Enter
+    window.addEventListener('keydown', handleKeyBlockade, true);
+    // We intercept Mousedown to TRAP Clicks
+    window.addEventListener('mousedown', handleMouseTrap, true);
+}
 
-    if (e.key === 'Enter' && !e.shiftKey) {
-        // Robust Target Resolution
+function handleKeyBlockade(e) {
+    if (!e.isTrusted) return;
+
+    if (e.key === 'Enter') {
         let target = e.target;
-        // If it's a Text Node, get parent
         if (target.nodeType === 3) target = target.parentElement;
         
-        // Safety check if target supports matches
-        if (!target || typeof target.matches !== 'function') return;
-
-        // Support Shadow DOM via composed path if needed, but usually target is sufficient for inputs
-        // Check for input fields
-        if (target.matches('input, textarea, [contenteditable="true"], [role="textbox"]')) {
-            console.log("[System] Trap Triggered by ENTER on", target);
+        if (target && target.matches && target.matches('input, textarea, [contenteditable="true"], [role="textbox"]')) {
+            // STOP EVERYTHING
+            console.log("[System] Enter Key Blocked. Waiting for Click.");
             e.preventDefault();
             e.stopPropagation();
+            e.stopImmediatePropagation();
             
-            // RECORD THE INPUT
-            cachedInput = target;
+            // Visual Warning
+            showStatusBadge("⚠️ DO NOT USE ENTER! CLICK THE 'SEND' BUTTON.");
             
-            const userText = target.value || target.innerText || "";
-            executeInjectionSequence(target, null, userText); 
+            // Flash the badge red
+            const badge = document.getElementById('aa-status-badge');
+            if (badge) {
+                badge.style.backgroundColor = "#bf616a";
+                setTimeout(() => badge.style.backgroundColor = "#252525", 1000);
+            }
         }
     }
 }
 
-function handleClickTrap(e) {
+function handleMouseTrap(e) {
     if (!e.isTrusted) return;
 
-    // Robust Target Resolution
-    let el = e.target;
-    if (el.nodeType === 3) el = el.parentElement; // Handle Text Nodes
-    if (!el || typeof el.closest !== 'function') return; // Handle Document/Window targets
+    let target = e.target;
+    if (target.nodeType === 3) target = target.parentElement;
+    if (!target || typeof target.closest !== 'function') return;
 
-    // Look for button in the click path
-    const target = el.closest('button, [role="button"], input[type="submit"], [data-testid*="send"], svg');
+    // Check for button-like elements
+    const btn = target.closest('button, [role="button"], input[type="submit"], [data-testid*="send"], svg');
     
-    if (target) {
-        // Find the input associated with this action
-        // First check cache, then fallback to heuristics
-        let input = cachedInput; 
-        if (!input || !input.isConnected) {
-            input = Heuristics.findBestInput();
-        }
-
-        if (input && (input.value || input.innerText)) {
-            console.log("[System] Trap Triggered by CLICK on", target);
+    if (btn) {
+        // Do we have a draft?
+        if (activeInput && (activeInput.value || activeInput.innerText)) {
+            console.log("[System] Trap Triggered by MOUSEDOWN on", btn);
+            
             e.preventDefault();
             e.stopPropagation();
+            e.stopImmediatePropagation();
             
-            // RECORD BOTH
-            cachedInput = input;
-            cachedButton = target;
+            // Sync final state
+            draftText = activeInput.value || activeInput.innerText || "";
             
-            const userText = input.value || input.innerText || "";
-            executeInjectionSequence(input, target, userText);
+            executeInjectionSequence(activeInput, btn, draftText);
         }
     }
 }
 
 // 2. THE SIDECAR (Popup Interaction)
 function handleRemoteCommand(text) {
-    // 1. Try Cached Input
-    let input = cachedInput;
-    
-    // 2. Fallback to Heuristics if cache is empty or dead
+    let input = activeInput;
     if (!input || !input.isConnected) {
-        console.log("[System] Cache miss/dead. Using Heuristics.");
         input = Heuristics.findBestInput();
     }
     
     if (input) {
-        // Pass cached button if available
-        executeInjectionSequence(input, cachedButton, text);
+        executeInjectionSequence(input, null, text);
     } else {
         console.error("AgentAnything: Could not find input box for remote command.");
         showStatusBadge("ERROR: Chat Input Not Found");
@@ -141,9 +150,11 @@ function handleRemoteCommand(text) {
 
 // 3. THE EXECUTION ENGINE
 async function executeInjectionSequence(inputElement, buttonElement, userText) {
-    // A. UI FEEDBACK
+    // A. LOCK DOWN
+    window.removeEventListener('keydown', handleKeyBlockade, true);
+    window.removeEventListener('mousedown', handleMouseTrap, true);
+    enableInputGuard(); 
     showStatusBadge("PREPARING PAYLOAD...");
-    // We do NOT remove listeners, we rely on !isTrusted check to avoid loops.
 
     // B. FETCH CONTEXT
     const response = await chrome.runtime.sendMessage({ action: "GET_LATEST_TARGET" });
@@ -186,7 +197,7 @@ ${userText}
     setTimeout(() => {
         let sent = false;
 
-        // Attempt 1: Revive the cached/trapped button
+        // Attempt 1: Trigger the trapped button
         if (buttonElement && buttonElement.isConnected) {
             console.log("[System] Clicking Trapped Button");
             triggerNuclearClick(buttonElement);
@@ -203,7 +214,7 @@ ${userText}
             }
         }
 
-        // Attempt 3: Enter Key / Form Submit
+        // Attempt 3: Enter Key (Only used if no button found/worked)
         if (!sent) {
             console.log("[System] Fallback: Enter Key");
             const keyConfig = { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true, cancelable: true };
@@ -246,6 +257,21 @@ async function visualType(input, text) {
     });
 }
 
+function enableInputGuard() {
+    if (inputGuardActive) return;
+    inputGuardActive = true;
+    
+    const blockEvent = (e) => {
+        if (!e.isTrusted) return; 
+        e.stopPropagation();
+        e.preventDefault();
+    };
+    
+    ['click', 'mousedown', 'mouseup', 'keydown', 'keyup', 'keypress', 'focus'].forEach(evt => {
+        window.addEventListener(evt, blockEvent, true); 
+    });
+}
+
 function showStatusBadge(text) {
     let badge = document.getElementById('aa-status-badge');
     if (!badge) {
@@ -256,7 +282,7 @@ function showStatusBadge(text) {
             background: #252525; color: #fff; padding: 10px 15px; 
             border: 1px solid #444; border-radius: 5px;
             font-family: sans-serif; font-size: 12px; z-index: 999999;
-            box-shadow: 0 5px 15px rgba(0,0,0,0.5); display: flex; align-items: center; gap: 10px;
+            box-shadow: 0 5px 15px rgba(0,0,0,0.5); display: flex; align-items: center; gap: 10px; transition: background-color 0.3s;
         `;
         document.body.appendChild(badge);
     }
