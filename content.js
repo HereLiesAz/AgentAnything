@@ -1,5 +1,5 @@
 // Run immediately to capture early events
-console.log("[AgentAnything] Content Script Loaded at document_start");
+console.log("[AgentAnything] Content Script Loaded");
 
 let role = null;
 let myTabId = null;
@@ -8,39 +8,61 @@ let inputGuardActive = false;
 
 // --- REAL-TIME STATE ---
 let draftText = "";
-let activeInput = null;
+let activeInput = null; // The DOM element the user is typing in
 
-// --- SHADOW DOM TOAST (The HUD) ---
+// --- SHADOW DOM HUD (The Overlay System) ---
 let shadowHost = null;
 let shadowRoot = null;
 let toastEl = null;
+let focusBoxEl = null; // The Green Border Overlay
 
-function ensureShadowDOM() {
-    if (document.getElementById('aa-shadow-host')) return;
+function ensureHUD() {
+    if (shadowHost && shadowHost.isConnected) return;
     if (!document.body && !document.documentElement) return; // Too early
 
     shadowHost = document.createElement('div');
-    shadowHost.id = 'aa-shadow-host';
-    shadowHost.style.cssText = 'position: fixed; top: 0; left: 0; width: 0; height: 0; z-index: 2147483647; pointer-events: none;';
+    shadowHost.id = 'aa-hud-host';
+    // Max Z-Index, pass-through pointer events so you can still click the input under it
+    shadowHost.style.cssText = 'position: fixed; top: 0; left: 0; width: 100vw; height: 100vh; z-index: 2147483647; pointer-events: none;';
     
     (document.documentElement || document.body).appendChild(shadowHost);
     shadowRoot = shadowHost.attachShadow({ mode: 'closed' });
 
     const style = document.createElement('style');
     style.textContent = `
+        /* The Toast Notification */
         .aa-toast {
             position: fixed; bottom: 50px; left: 50%; transform: translateX(-50%);
-            padding: 14px 28px; color: #fff; font-family: sans-serif; 
-            font-size: 16px; font-weight: 700; background: #252525;
-            border-radius: 50px; box-shadow: 0 10px 40px rgba(0,0,0,0.8); 
-            border: 2px solid rgba(255,255,255,0.1); opacity: 0; transition: opacity 0.3s;
+            padding: 12px 24px; color: #fff; font-family: -apple-system, system-ui, sans-serif;
+            font-size: 14px; font-weight: 700; background: #1a1a1a;
+            border-radius: 8px; box-shadow: 0 8px 30px rgba(0,0,0,0.8); 
+            border: 1px solid rgba(255,255,255,0.1); opacity: 0; transition: opacity 0.2s;
             pointer-events: none; text-align: center; white-space: nowrap;
+            display: flex; align-items: center; gap: 8px;
         }
         .aa-toast.visible { opacity: 1; }
-        .aa-green { border-color: #a3be8c; color: #a3be8c; }
-        .aa-red { border-color: #bf616a; color: #bf616a; }
+        .aa-green { border-left: 4px solid #a3be8c; }
+        .aa-red { border-left: 4px solid #bf616a; }
+        
+        /* The Focus Box (Green Border Overlay) */
+        .aa-focus-box {
+            position: absolute; border: 3px solid #a3be8c; border-radius: 4px;
+            box-shadow: 0 0 15px rgba(163, 190, 140, 0.4);
+            transition: all 0.1s ease-out; opacity: 0; pointer-events: none;
+        }
+        .aa-focus-box.visible { opacity: 1; }
+        .aa-focus-label {
+            position: absolute; top: -22px; right: 0; background: #a3be8c; color: #000;
+            font-size: 10px; padding: 2px 6px; font-weight: bold; border-radius: 2px;
+        }
     `;
     shadowRoot.appendChild(style);
+
+    // Create Elements
+    focusBoxEl = document.createElement('div');
+    focusBoxEl.className = 'aa-focus-box';
+    focusBoxEl.innerHTML = '<div class="aa-focus-label">AGENT TARGET</div>';
+    shadowRoot.appendChild(focusBoxEl);
 
     toastEl = document.createElement('div');
     toastEl.className = 'aa-toast';
@@ -48,7 +70,7 @@ function ensureShadowDOM() {
 }
 
 function showToast(text, type = "normal") {
-    ensureShadowDOM();
+    ensureHUD();
     if (!toastEl) return;
     toastEl.innerText = text;
     toastEl.className = 'aa-toast visible';
@@ -56,30 +78,37 @@ function showToast(text, type = "normal") {
     if (type === "error") toastEl.classList.add('aa-red');
 }
 
+function updateFocusBox(targetRect) {
+    ensureHUD();
+    if (!focusBoxEl) return;
+    
+    if (targetRect) {
+        focusBoxEl.style.top = targetRect.top + "px";
+        focusBoxEl.style.left = targetRect.left + "px";
+        focusBoxEl.style.width = targetRect.width + "px";
+        focusBoxEl.style.height = targetRect.height + "px";
+        focusBoxEl.classList.add('visible');
+    } else {
+        focusBoxEl.classList.remove('visible');
+    }
+}
+
 // --- MESSAGING ---
-// We wrap in a try/catch because sendMessage might fail before background is ready
-try {
-    chrome.runtime.sendMessage({ action: "HELLO" });
-} catch(e) {}
+try { chrome.runtime.sendMessage({ action: "HELLO" }); } catch(e) {}
 
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   switch (msg.action) {
     case "INIT_AGENT":
       if (role !== "AGENT") {
         role = "AGENT";
-        // Wait for DOM to be ready for visual stuff
-        if (document.readyState === "loading") {
-            document.addEventListener('DOMContentLoaded', initAgent);
-        } else {
-            initAgent();
-        }
+        waitForBody(() => initAgent());
       }
       break;
     case "INIT_TARGET":
       if (role !== "TARGET") {
         role = "TARGET";
         myTabId = msg.tabId;
-        initTarget();
+        waitForBody(() => initTarget());
       }
       break;
     case "EXECUTE_COMMAND":
@@ -97,38 +126,50 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   }
 });
 
+function waitForBody(cb) {
+    if (document.body) return cb();
+    const obs = new MutationObserver(() => {
+        if (document.body) { obs.disconnect(); cb(); }
+    });
+    obs.observe(document.documentElement, { childList: true });
+}
+
 // --- AGENT LOGIC ---
 
 function initAgent() {
   console.log("[System] Agent Armed.");
   showToast("1. TYPE PROMPT  |  2. CLICK SEND");
   
-  // Start the visual lock loop
-  setInterval(highlightActiveInput, 1000);
+  // High-Speed Visual Tracker
+  setInterval(trackFocusState, 200);
   
   startInputMonitor();
   armAgentTrap();
   observeAgentOutput();
 }
 
-// 1. VISUAL HIGHLIGHTER (The "Lock")
-function highlightActiveInput() {
-    // Try to find the input we should be watching
-    let input = activeInput;
-    if (!input || !input.isConnected) {
-        input = Heuristics.findBestInput();
+// 1. DEEP FOCUS TRACKER (The "Lock")
+function trackFocusState() {
+    // 1. Find the REAL focused element (piercing Shadow DOMs)
+    let el = document.activeElement;
+    while (el && el.shadowRoot && el.shadowRoot.activeElement) {
+        el = el.shadowRoot.activeElement;
     }
     
-    if (input && input !== activeInput) {
-        // Remove old border if different
-        if (activeInput) activeInput.style.outline = "";
-        activeInput = input;
-    }
+    // 2. Is it a valid input?
+    const isInput = el && (
+        el.matches('input, textarea, [contenteditable="true"], [role="textbox"]') ||
+        // Heuristic fallback: if it has no tag but is active, it might be a canvas/custom editor
+        (el.tagName.includes('-') && el.isContentEditable) 
+    );
 
-    if (activeInput) {
-        // Apply Neon Green Border to confirm Lock
-        activeInput.style.outline = "2px solid #a3be8c";
-        activeInput.setAttribute("data-aa-locked", "true");
+    if (isInput) {
+        activeInput = el;
+        updateFocusBox(el.getBoundingClientRect());
+    } else {
+        // If user clicked away, keep the box on the last known valid input for a few seconds
+        // or hide it. Here we hide it to be cleaner.
+        // updateFocusBox(null);
     }
 }
 
@@ -136,35 +177,31 @@ function highlightActiveInput() {
 function startInputMonitor() {
     window.addEventListener('input', (e) => {
         if (!e.isTrusted) return;
-        const target = e.target;
+        const target = e.composedPath()[0]; // Get true target
         if (isInput(target)) {
             draftText = target.value || target.innerText || "";
-            if (draftText.length > 0) showToast("CLICK 'SEND' TO LAUNCH", "normal");
+            if (draftText.length > 0) showToast("READY TO SEND...", "normal");
         }
     }, true);
 }
 
 function isInput(el) {
-    if (!el) return false;
+    if (!el || !el.matches) return false;
     return el.matches('input, textarea, [contenteditable="true"], [role="textbox"]');
 }
 
 // 3. THE TRAP
 function armAgentTrap() {
-    // Capture Phase: Window -> Target
     window.addEventListener('keydown', handleKeyBlockade, true);
     window.addEventListener('mousedown', handleMouseTrap, true);
 }
 
 function handleKeyBlockade(e) {
     if (!e.isTrusted) return;
-    if (e.key === 'Enter') {
-        let target = e.target;
-        if (target.nodeType === 3) target = target.parentElement; // Text Node fix
-        
+    if (e.key === 'Enter' && !e.shiftKey) {
+        let target = e.composedPath()[0]; 
         if (isInput(target)) {
-            // BLOCK ENTER
-            console.log("[System] Enter Key Blocked");
+            console.log("[System] Enter Blocked");
             e.preventDefault();
             e.stopPropagation();
             e.stopImmediatePropagation();
@@ -176,7 +213,6 @@ function handleKeyBlockade(e) {
 function handleMouseTrap(e) {
     if (!e.isTrusted) return;
 
-    // Use composedPath for Shadow DOM support
     const path = e.composedPath();
     const btn = path.find(el => {
         return el.tagName && (
@@ -187,24 +223,30 @@ function handleMouseTrap(e) {
     });
 
     if (btn) {
-        // Only trap if we have a draft and an active input
-        if (activeInput && (activeInput.value || activeInput.innerText)) {
+        // Only trap if we have a draft
+        if (draftText.length > 0) {
             console.log("[System] TRAPPED CLICK on:", btn);
-            
             e.preventDefault();
             e.stopPropagation();
             e.stopImmediatePropagation();
             
-            draftText = activeInput.value || activeInput.innerText || "";
-            
             showToast("🔒 INJECTING...", "success");
-            executeInjectionSequence(activeInput, btn, draftText);
+            
+            // We use 'activeInput' derived from the tracker loop
+            const inputToUse = activeInput || Heuristics.findBestInput();
+            
+            executeInjectionSequence(inputToUse, btn, draftText);
         }
     }
 }
 
 // 4. EXECUTION
 async function executeInjectionSequence(inputElement, buttonElement, userText) {
+    if (!inputElement) {
+        showToast("❌ ERROR: INPUT LOST", "error");
+        return;
+    }
+
     // A. PREP
     window.removeEventListener('keydown', handleKeyBlockade, true);
     window.removeEventListener('mousedown', handleMouseTrap, true);
@@ -250,13 +292,11 @@ ${userText}
     setTimeout(() => {
         let sent = false;
         
-        // 1. Trapped Button
         if (buttonElement && buttonElement.isConnected) {
             triggerNuclearClick(buttonElement);
             sent = true;
         }
 
-        // 2. Heuristic Button
         if (!sent) {
             const freshBtn = Heuristics.findSendButton();
             if (freshBtn) {
@@ -265,7 +305,6 @@ ${userText}
             }
         }
 
-        // 3. Fallback Enter
         if (!sent) {
             const k = { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true, cancelable: true };
             inputElement.dispatchEvent(new KeyboardEvent('keydown', k));
@@ -360,11 +399,11 @@ function executeCommand(cmd) {
         const el = Heuristics.getElementByAAId(cmd.id);
         if (el) {
             el.scrollIntoView({ behavior: "smooth", block: "center" });
-            el.style.outline = "3px solid #0f0";
+            updateFocusBox(el.getBoundingClientRect()); // Reuse focus box for target highlight
             setTimeout(() => {
                 if (cmd.action === "click") el.click();
                 if (cmd.action === "type") setNativeValue(el, cmd.value);
-                el.style.outline = "";
+                updateFocusBox(null);
                 chrome.runtime.sendMessage({ action: "TARGET_UPDATE", payload: { type: "APPEND", content: `OK: ${cmd.action} -> ${cmd.id}` } });
             }, 500);
         }
