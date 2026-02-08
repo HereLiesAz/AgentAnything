@@ -6,6 +6,9 @@ let lastCommandSignature = "";
 let draftText = "";
 let activeInput = null;
 
+// --- LOCKING STATE ---
+let agentLocked = false; 
+
 // --- IMMORTAL UI ---
 let shadowHost = null;
 let shadowRoot = null;
@@ -13,15 +16,9 @@ let panelEl = null;
 let toastEl = null;   
 
 function ensureUI() {
-    // Retry if body isn't ready yet
     if (!document.body) return;
-
-    // Check if host got nuked by the page
-    if (shadowHost && !shadowHost.isConnected) {
-        shadowHost = null; 
-    }
-
-    if (shadowHost) return; // UI exists and is connected
+    if (shadowHost && !shadowHost.isConnected) shadowHost = null; 
+    if (shadowHost) return; 
 
     try {
         shadowHost = document.createElement('div');
@@ -49,6 +46,7 @@ function ensureUI() {
             .aa-dot.red { background: #bf616a; box-shadow: 0 0 5px #bf616a; }
             .aa-dot.blue { background: #88c0d0; box-shadow: 0 0 5px #88c0d0; }
             .aa-dot.yellow { background: #ebcb8b; box-shadow: 0 0 5px #ebcb8b; }
+            .aa-dot.pink { background: #b48ead; box-shadow: 0 0 5px #b48ead; } 
 
             .aa-toast {
                 position: fixed; bottom: 60px; left: 20px;
@@ -96,7 +94,6 @@ function showToast(text) {
 
 // --- MESSAGING ---
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
-  // console.log("[AA] Msg:", msg.action);
   switch (msg.action) {
     case "INIT_AGENT":
       role = "AGENT";
@@ -113,20 +110,27 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     case "REMOTE_INJECT":
       if (role === "AGENT") handleRemoteCommand(msg.payload);
       break;
+    case "INJECT_UPDATE":
+        // THE UNLOCK KEY: Target has responded.
+        if (role === "AGENT") {
+            agentLocked = false;
+            setStatus("AGENT: ARMED", "blue");
+            showToast("TARGET UPDATED");
+        }
+        break;
     case "DISENGAGE_LOCAL":
       window.location.reload();
       break;
   }
 });
 
-// Hello loop to catch up if we missed the init
+// Hello loop
 setInterval(() => {
     if (!role) {
         try { chrome.runtime.sendMessage({ action: "HELLO" }); } catch(e) {}
     } else {
         ensureUI();
-        // Keep UI Alive
-        if (role === "AGENT") {
+        if (role === "AGENT" && !agentLocked) {
              if (activeInput && activeInput.isConnected) activeInput.style.outline = "2px solid #a3be8c";
              else activeInput = Heuristics.findBestInput();
         }
@@ -140,12 +144,19 @@ function initAgent() {
         if (isInput(e.target)) {
             activeInput = e.target;
             draftText = e.target.value || e.target.innerText;
-            e.target.style.outline = "2px solid #a3be8c";
+            if (!agentLocked) e.target.style.outline = "2px solid #a3be8c";
         }
     }, true);
     
     window.addEventListener('keydown', (e) => {
         if (e.key === 'Enter' && !e.shiftKey && draftText.length > 0 && isInput(e.target)) {
+            // LOCK CHECK
+            if (agentLocked) {
+                e.preventDefault(); e.stopImmediatePropagation();
+                showToast("⛔ WAITING FOR TARGET...");
+                return;
+            }
+
             e.preventDefault();
             e.stopImmediatePropagation();
             setStatus("TRAP: ENTER", "yellow");
@@ -154,11 +165,17 @@ function initAgent() {
     }, true);
 
     window.addEventListener('mousedown', (e) => {
-        // Quick check for send button
         const el = e.target;
         if (activeInput && draftText.length > 0 && (
             el.tagName === 'BUTTON' || el.closest('button') || el.getAttribute('role') === 'button'
         )) {
+            // LOCK CHECK
+            if (agentLocked) {
+                e.preventDefault(); e.stopImmediatePropagation();
+                showToast("⛔ WAITING FOR TARGET...");
+                return;
+            }
+
             e.preventDefault();
             e.stopImmediatePropagation();
             setStatus("TRAP: CLICK", "yellow");
@@ -176,7 +193,7 @@ function isInput(el) {
 // --- TARGET ---
 function initTarget() {
     setStatus("TARGET: LINKED", "green");
-    setInterval(reportState, 2000);
+    // Initial report, but rely on updates for synchronization
     reportState();
 }
 
@@ -189,7 +206,8 @@ function reportState() {
 
 // --- EXECUTION ---
 async function executeInjection(input, btn, text) {
-    setStatus("INJECTING...", "blue");
+    agentLocked = true; // LOCK ENGAGED
+    setStatus("WAITING FOR TARGET...", "pink");
     
     let context = { content: "NO TARGET" };
     try { context = await chrome.runtime.sendMessage({ action: "GET_LATEST_TARGET" }) || context; } catch(e){}
@@ -209,7 +227,6 @@ ${context.content}
     setNativeValue(input, payload);
     
     setTimeout(() => {
-        setStatus("FIRING...", "red");
         if (btn) triggerClick(btn);
         else if (Heuristics.findSendButton()) triggerClick(Heuristics.findSendButton());
         else {
@@ -218,7 +235,7 @@ ${context.content}
             input.dispatchEvent(new KeyboardEvent('keyup', k));
         }
         draftText = "";
-        setTimeout(() => setStatus("AGENT: ARMED", "blue"), 1000);
+        // DO NOT UNLOCK HERE. Wait for INJECT_UPDATE.
     }, 200);
 }
 
@@ -257,9 +274,10 @@ function observeOutput() {
 }
 
 function handleRemoteCommand(txt) {
-    if (activeInput) executeInjection(activeInput, null, txt);
+    if (activeInput && !agentLocked) executeInjection(activeInput, null, txt);
 }
 
+// --- TARGET EXECUTION ---
 function executeCommand(cmd) {
     showToast(`EXEC: ${cmd.action}`);
     if (cmd.tool === "interact") {
@@ -271,8 +289,43 @@ function executeCommand(cmd) {
                 if (cmd.action === "click") triggerClick(el);
                 if (cmd.action === "type") setNativeValue(el, cmd.value);
                 el.style.outline = "";
-                setTimeout(reportState, 1000);
+                
+                // WAIT FOR SETTLED DOM
+                waitForSettledDOM(() => {
+                    reportState();
+                });
             }, 500);
         }
     }
+}
+
+// The Mutation Debouncer
+function waitForSettledDOM(callback) {
+    let timer = null;
+    let maxTimer = null;
+    
+    // Hard limit: If page never settles, just send update after 4s
+    maxTimer = setTimeout(() => {
+        if (observer) observer.disconnect();
+        callback();
+    }, 4000);
+
+    const observer = new MutationObserver(() => {
+        // Reset the debounce timer on every change
+        if (timer) clearTimeout(timer);
+        timer = setTimeout(() => {
+            clearTimeout(maxTimer);
+            observer.disconnect();
+            callback();
+        }, 500); // 500ms silence required
+    });
+
+    observer.observe(document.body, { subtree: true, childList: true, attributes: true });
+
+    // Initial trigger in case nothing changes
+    timer = setTimeout(() => {
+        clearTimeout(maxTimer);
+        observer.disconnect();
+        callback();
+    }, 500);
 }
