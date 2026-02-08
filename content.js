@@ -7,6 +7,65 @@ let inputGuardActive = false;
 let draftText = "";
 let activeInput = null;
 
+// --- SHADOW DOM SETUP ---
+let shadowHost = null;
+let shadowRoot = null;
+let toastEl = null;
+
+function ensureShadowDOM() {
+    if (shadowHost) return;
+
+    // Create Host
+    shadowHost = document.createElement('div');
+    shadowHost.id = 'aa-shadow-host';
+    shadowHost.style.cssText = 'position: fixed; top: 0; left: 0; width: 0; height: 0; z-index: 2147483647; pointer-events: none;';
+    
+    // Attach to HTML to avoid Body-level overlays hiding it
+    (document.documentElement || document.body).appendChild(shadowHost);
+
+    // Create Shadow Root
+    shadowRoot = shadowHost.attachShadow({ mode: 'closed' });
+
+    // Inject Styles ONCE
+    const style = document.createElement('style');
+    style.textContent = `
+        .aa-toast {
+            position: fixed; bottom: 30px; left: 50%; transform: translateX(-50%);
+            padding: 12px 24px; color: #fff; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            font-size: 14px; font-weight: 600; background: #252525;
+            border-radius: 8px; box-shadow: 0 10px 30px rgba(0,0,0,0.5); 
+            border: 1px solid rgba(255,255,255,0.1); transition: all 0.2s; pointer-events: none;
+            display: flex; align-items: center; gap: 8px; opacity: 0;
+        }
+        .aa-toast.visible { opacity: 1; transform: translateX(-50%) translateY(0); }
+        .aa-pulse { animation: pulse 1.5s infinite; }
+        @keyframes pulse { 
+            0% { box-shadow: 0 0 0 0 rgba(255,255,255, 0.2); } 
+            70% { box-shadow: 0 0 0 10px rgba(255,255,255, 0); } 
+            100% { box-shadow: 0 0 0 0 rgba(255,255,255, 0); } 
+        }
+    `;
+    shadowRoot.appendChild(style);
+
+    // Create Toast Container
+    toastEl = document.createElement('div');
+    toastEl.className = 'aa-toast';
+    shadowRoot.appendChild(toastEl);
+}
+
+function showToast(text, bgColor = "#252525", pulse = false) {
+    ensureShadowDOM();
+    if (!toastEl) return;
+
+    toastEl.innerText = text;
+    toastEl.style.background = bgColor;
+    
+    // Toggle Classes
+    toastEl.classList.add('visible');
+    if (pulse) toastEl.classList.add('aa-pulse');
+    else toastEl.classList.remove('aa-pulse');
+}
+
 // --- INITIALIZATION ---
 chrome.runtime.sendMessage({ action: "HELLO" });
 
@@ -40,35 +99,6 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   }
 });
 
-// --- UI: TOAST NOTIFICATIONS ---
-let toastEl = null;
-function showToast(text, bgColor = "#252525", pulse = false) {
-    if (!toastEl) {
-        toastEl = document.createElement('div');
-        toastEl.style.cssText = `
-            position: fixed; bottom: 30px; left: 50%; transform: translateX(-50%);
-            padding: 12px 24px; color: #fff; font-family: sans-serif; font-size: 14px; font-weight: bold;
-            border-radius: 8px; box-shadow: 0 10px 30px rgba(0,0,0,0.5); z-index: 2147483647;
-            border: 1px solid rgba(255,255,255,0.1); transition: all 0.2s; pointer-events: none;
-        `;
-        document.body.appendChild(toastEl);
-    }
-    toastEl.innerText = text;
-    toastEl.style.background = bgColor;
-    
-    if (pulse) {
-        toastEl.style.animation = "aa-pulse 1.5s infinite";
-        if (!document.getElementById('aa-styles')) {
-            const style = document.createElement('style');
-            style.id = 'aa-styles';
-            style.innerHTML = `@keyframes aa-pulse { 0% { box-shadow: 0 0 0 0 rgba(255,255,255, 0.4); } 70% { box-shadow: 0 0 0 10px rgba(255,255,255, 0); } 100% { box-shadow: 0 0 0 0 rgba(255,255,255, 0); } }`;
-            document.head.appendChild(style);
-        }
-    } else {
-        toastEl.style.animation = "none";
-    }
-}
-
 // --- AGENT LOGIC ---
 
 function initAgent() {
@@ -101,10 +131,14 @@ function startInputMonitor() {
         }
     }, true);
     
+    // Also check on focus to remind user
     window.addEventListener('focus', (e) => {
         const target = e.target;
         if (target.matches && target.matches('input, textarea, [contenteditable="true"], [role="textbox"]')) {
             activeInput = target;
+            if ((target.value || target.innerText || "").length > 0) {
+                showToast("2. CLICK 'SEND' BUTTON (Do not use Enter)", "#bf616a", true);
+            }
         }
     }, true);
 }
@@ -122,11 +156,11 @@ function handleKeyBlockade(e) {
         let target = e.target;
         if (target.nodeType === 3) target = target.parentElement;
         
-        // Only block if we are actually in a text box
         if (target && target.matches && target.matches('input, textarea, [contenteditable="true"], [role="textbox"]')) {
             console.log("[System] Enter Blocked");
             e.preventDefault();
             e.stopPropagation();
+            e.stopImmediatePropagation();
             showToast("⛔ ENTER DISABLED. PLEASE CLICK 'SEND'.", "#bf616a", true);
         }
     }
@@ -135,10 +169,8 @@ function handleKeyBlockade(e) {
 function handleMouseTrap(e) {
     if (!e.isTrusted) return;
 
-    // Use composedPath to pierce Shadow DOM (e.g. clicking SVG inside button)
+    // Use composedPath to pierce Shadow DOM
     const path = e.composedPath();
-    
-    // Find the first button-like ancestor
     const btn = path.find(el => {
         return el.tagName && (
             el.matches('button, [role="button"], input[type="submit"]') ||
@@ -148,19 +180,15 @@ function handleMouseTrap(e) {
     });
     
     if (btn) {
-        // Check if we have a draft
         if (activeInput && (activeInput.value || activeInput.innerText)) {
             console.log("[System] TRAPPED CLICK on:", btn);
             
-            // STOP THE CLICK
             e.preventDefault();
             e.stopPropagation();
             e.stopImmediatePropagation();
             
-            // Capture State
             draftText = activeInput.value || activeInput.innerText || "";
             
-            // Execute
             showToast("🔒 CAPTURED. INJECTING...", "#a3be8c");
             executeInjectionSequence(activeInput, btn, draftText);
         }
@@ -292,7 +320,7 @@ function enableInputGuard() {
     });
 }
 
-// --- OUTPUT PARSING ---
+// --- OUTPUT PARSER ---
 function observeAgentOutput() {
   const observer = new MutationObserver((mutations) => {
     const bodyText = document.body.innerText;
