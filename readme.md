@@ -35,8 +35,8 @@ Since this tool effectively turns your browser into a botnet node, it is not on 
 
 ## 🕹️ Usage Protocol
 
-### Phase 1: The Victim (Target)
-1.  Navigate to the website you wish to control (e.g., a documentation site, a search engine, a competitor's dashboard).
+### Phase 1: The Tool (Target)
+1.  Navigate to the website you wish to control (e.g., a documentation site, a search engine, another AI).
 2.  Click the **AgentAnything** extension icon.
 3.  Select **MAKE TARGET**.
     * *Status:* The tab is now listening. It will snapshot its DOM and wait for orders.
@@ -46,8 +46,8 @@ Since this tool effectively turns your browser into a botnet node, it is not on 
 2.  Click the **AgentAnything** extension icon.
 3.  Select **MAKE AGENT**.
     * *Status:* The extension queues the System Instructions and Target Map. Input fields on the page will highlight green to indicate they are ready for capture.
-4.  Type your command into the AI chat (e.g., *"Search for 'glitch art' and open the first result"*).
-5.  Press **Enter** or click **Send**.
+4.  Type your command into the AI chat.
+5.  Press the **Submit** button.
     * *Action:* The extension intercepts your prompt, locks the UI (scrolling only), and injects the queued context (System + Target + Your Prompt) into the AI.
 
 ### Phase 3: The Loop
