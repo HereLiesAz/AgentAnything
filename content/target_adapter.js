@@ -1,196 +1,209 @@
-// Target Adapter - Handles DOM, Indexing, and Diffing
-console.log("[AgentAnything] Target Adapter Loaded");
+// Target Adapter - Semantic Parsing (V2.0)
+console.log("[AgentAnything] Target Adapter V2 Loaded");
 
-// --- STATE ---
-let elementMap = new Map(); // id -> element
+// --- 1. State ---
+let interactables = {};
 let nextId = 1;
-let lastSnapshot = null;
-let mutationTimer = null;
+let lastSnapshot = "";
+let debounceTimer = null;
 
-// --- OVERLAY SYSTEM ---
-let shadowHost, shadowRoot;
+// --- 2. Overlay (Phase 2) ---
 
-function ensureOverlay() {
-    if (shadowHost && shadowHost.isConnected) return;
-    shadowHost = document.createElement('div');
-    shadowHost.id = 'aa-overlay-host';
-    shadowHost.style.cssText = 'position: fixed; top: 0; left: 0; width: 0; height: 0; z-index: 2147483647; pointer-events: none;';
-    document.body.appendChild(shadowHost);
-    shadowRoot = shadowHost.attachShadow({ mode: 'closed' });
+let overlayRef = null;
 
-    const style = document.createElement('style');
-    style.textContent = `
-        .aa-highlight {
-            position: fixed;
-            border: 2px solid #00ff00;
-            background: rgba(0, 255, 0, 0.1);
-            pointer-events: none;
-            z-index: 2147483647;
-            border-radius: 4px;
-            transition: all 0.2s ease;
-        }
-        .aa-label {
-            position: absolute;
-            top: -18px;
-            left: 0;
-            background: #00ff00;
-            color: #000;
-            font-family: monospace;
-            font-size: 10px;
-            padding: 2px 4px;
-            border-radius: 2px;
-            font-weight: bold;
-        }
-    `;
-    shadowRoot.appendChild(style);
-}
+function showGreenOutline(elementId) {
+    const el = interactables[elementId];
+    if (!el) return;
 
-function showOverlay(id, rect) {
-    ensureOverlay();
-    // Clean old
-    const old = shadowRoot.getElementById(`aa-hl-${id}`);
-    if (old) old.remove();
+    // Inject Shadow DOM overlay
+    let host = document.getElementById('agent-overlay');
 
-    const div = document.createElement('div');
-    div.id = `aa-hl-${id}`;
-    div.className = 'aa-highlight';
-    div.style.left = rect.left + 'px';
-    div.style.top = rect.top + 'px';
-    div.style.width = rect.width + 'px';
-    div.style.height = rect.height + 'px';
+    if (!host) {
+        host = document.createElement('div');
+        host.id = 'agent-overlay';
+        // Ensure it covers viewport and is on top
+        host.style.position = 'fixed';
+        host.style.top = '0';
+        host.style.left = '0';
+        host.style.width = '100vw';
+        host.style.height = '100vh';
+        host.style.zIndex = '2147483647';
+        host.style.pointerEvents = 'none'; // Crucial!
+        document.body.appendChild(host);
+        overlayRef = host.attachShadow({mode: 'closed'});
+    }
 
-    div.innerHTML = `<div class="aa-label">${id}</div>`;
-    shadowRoot.appendChild(div);
+    // Draw green box at element coordinates
+    const rect = el.getBoundingClientRect();
+    const box = document.createElement('div');
+    box.style.position = 'absolute'; // within fixed overlay
+    box.style.left = `${rect.left}px`;
+    box.style.top = `${rect.top}px`;
+    box.style.width = `${rect.width}px`;
+    box.style.height = `${rect.height}px`;
+    box.style.border = '2px solid #00ff00';
+    box.style.zIndex = '999999';
+    box.style.pointerEvents = 'none';
 
-    // Auto remove after 2s
+    // Label
+    const label = document.createElement('span');
+    label.innerText = `ID: ${elementId}`;
+    label.style.background = '#00ff00';
+    label.style.color = '#000';
+    label.style.position = 'absolute';
+    label.style.top = '-20px';
+    label.style.left = '0';
+    label.style.fontSize = '12px';
+    label.style.fontWeight = 'bold';
+    label.style.padding = '2px 4px';
+
+    box.appendChild(label);
+    overlayRef.appendChild(box);
+
+    // Remove after 2s
     setTimeout(() => {
-        div.style.opacity = '0';
-        setTimeout(() => div.remove(), 200);
+        if (box && box.parentNode) box.remove();
     }, 2000);
 }
 
 
-// --- PII REDACTION ---
+// --- 3. DOM Parsing (Phase 2) ---
 
 function redactPII(text) {
-    if (!text || typeof text !== 'string') return text;
-    // Email
-    text = text.replace(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g, '[EMAIL_REDACTED]');
-    // Phone (US format mostly)
-    text = text.replace(/\b\d{3}[-.]?\d{3}[-.]?\d{4}\b/g, '[PHONE_REDACTED]');
-    // Credit Card (Simple 16 digit check)
-    text = text.replace(/\b\d{4}[- ]?\d{4}[- ]?\d{4}[- ]?\d{4}\b/g, '[CC_REDACTED]');
+    if (!text) return "";
+    text = text.replace(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g, '[EMAIL]');
+    // Simple US Phone
+    text = text.replace(/\b\d{3}[-.]?\d{3}[-.]?\d{4}\b/g, '[PHONE]');
+    // Simple CC (16 digits)
+    text = text.replace(/\b(?:\d{4}[- ]?){3}\d{4}\b/g, '[CC]');
     return text;
 }
 
+function parseDOM() {
+    interactables = {};
+    nextId = 1; // Reset IDs for fresh snapshot
 
-// --- SEMANTIC DOM ---
+    let output = [];
+    let elementIds = []; // Optimization: Track IDs for background map
 
-function isInteractive(el) {
-    const tag = el.tagName;
-    const role = el.getAttribute('role');
-    const type = el.type;
-    return (
-        tag === 'A' ||
-        tag === 'BUTTON' ||
-        tag === 'INPUT' ||
-        tag === 'TEXTAREA' ||
-        tag === 'SELECT' ||
-        role === 'button' ||
-        role === 'link' ||
-        role === 'checkbox' ||
-        role === 'menuitem' ||
-        el.getAttribute('contenteditable') === 'true' ||
-        el.onclick !== null
-    );
-}
+    // Use TreeWalker (V2 Requirement)
+    const walker = document.createTreeWalker(
+        document.body,
+        NodeFilter.SHOW_ELEMENT,
+        {
+            acceptNode: (node) => {
+                const tag = node.tagName.toLowerCase();
+                // "ignoring <script>, <style>, and hidden elements"
+                if (['script', 'style', 'noscript', 'meta', 'link', 'svg', 'path'].includes(tag)) return NodeFilter.FILTER_REJECT;
 
-function isVisible(el) {
-    const style = window.getComputedStyle(el);
-    return style.display !== 'none' && style.visibility !== 'hidden' && style.opacity !== '0' && el.offsetWidth > 0 && el.offsetHeight > 0;
-}
+                const style = window.getComputedStyle(node);
+                if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') return NodeFilter.FILTER_REJECT;
 
-function getOrAssignId(el) {
-    if (el.dataset.agentId) return parseInt(el.dataset.agentId);
-    const id = nextId++;
-    el.dataset.agentId = id;
-    elementMap.set(id, el);
-    return id;
-}
-
-function buildSemanticNode(el) {
-    // Skip noise
-    if (el.nodeType !== Node.ELEMENT_NODE) return null;
-    if (!isVisible(el)) return null;
-    const tag = el.tagName.toLowerCase();
-    if (['script', 'style', 'noscript', 'meta', 'link', 'svg', 'path'].includes(tag)) return null;
-
-    const interactive = isInteractive(el);
-    let node = {
-        tag: tag
-    };
-
-    if (interactive) {
-        node.id = getOrAssignId(el);
-        node.interactive = true;
-    }
-
-    // Attributes
-    if (el.value) node.value = redactPII(el.value);
-    if (el.placeholder) node.placeholder = redactPII(el.placeholder);
-    if (el.name) node.name = redactPII(el.name);
-    if (el.getAttribute('aria-label')) node.ariaLabel = redactPII(el.getAttribute('aria-label'));
-    if (tag === 'a' && el.href) node.href = el.href; // hrefs usually not redacted unless containing token? Leaving for now.
-
-    // Children
-    const children = [];
-    if (el.childNodes && el.childNodes.length > 0) {
-        el.childNodes.forEach(child => {
-            if (child.nodeType === Node.TEXT_NODE) {
-                const text = child.textContent.trim();
-                if (text.length > 0) children.push(redactPII(text.substring(0, 100))); // Truncate and redact
-            } else if (child.nodeType === Node.ELEMENT_NODE) {
-                const childNode = buildSemanticNode(child);
-                if (childNode) children.push(childNode);
+                return NodeFilter.FILTER_ACCEPT;
             }
-        });
+        }
+    );
+
+    while(walker.nextNode()) {
+        const el = walker.currentNode;
+        const tag = el.tagName.toLowerCase();
+
+        // "Indexing: Assigns a unique Interaction ID to every interactive element (Inputs, Buttons, Links)."
+        const isInteractive = (
+            tag === 'a' ||
+            tag === 'button' ||
+            tag === 'input' ||
+            tag === 'textarea' ||
+            tag === 'select' ||
+            el.getAttribute('role') === 'button' ||
+            el.getAttribute('contenteditable') === 'true' ||
+            el.onclick
+        );
+
+        if (isInteractive) {
+            const id = nextId++;
+            interactables[id] = el;
+            elementIds.push(id);
+            el.dataset.agentId = id; // Store for debugging
+
+            // "Compression: Converts the DOM into a simplified XML/Markdown schema"
+
+            let xml = `<${tag} id="${id}"`;
+
+            // Attributes
+            if (el.value) xml += ` value="${redactPII(el.value)}"`;
+            if (el.placeholder) xml += ` placeholder="${redactPII(el.placeholder)}"`;
+
+            // Try to find a label
+            let labelText = el.getAttribute('aria-label') || el.getAttribute('name');
+            if (!labelText && el.id) {
+                const labelEl = document.querySelector(`label[for="${el.id}"]`);
+                if (labelEl) labelText = labelEl.innerText;
+            }
+            if (labelText) xml += ` label="${redactPII(labelText)}"`;
+
+            // Redact href in Anchor tags (Review Feedback)
+            if (tag === 'a' && el.href) {
+                try {
+                    const url = new URL(el.href);
+                    // Just redact query string for safety
+                    xml += ` href="${url.origin}${url.pathname}[REDACTED_QUERY]"`;
+                } catch(e) {
+                     // If invalid URL, just redact whole thing or ignore
+                     xml += ` href="[INVALID_URL]"`;
+                }
+            }
+
+            // Inner Text for containers
+            let innerText = "";
+            if (tag !== 'input' && tag !== 'textarea' && tag !== 'select') {
+                innerText = el.innerText.trim();
+                innerText = redactPII(innerText).substring(0, 50); // Truncate
+            }
+
+            xml += `>`; // Close opening tag
+
+            if (innerText) {
+                xml += `${innerText}`;
+            }
+
+            xml += `</${tag}>`;
+
+            output.push(xml);
+        }
     }
 
-    if (children.length > 0) node.children = children;
-
-    return node;
-}
-
-function generateSnapshot() {
-    elementMap.clear();
-    return buildSemanticNode(document.body);
+    return { snapshot: output.join("\n"), elementIds: elementIds };
 }
 
 
-// --- DIFFING & OBSERVING ---
+// --- 4. Diffing & Updates (Phase 2) ---
 
 function checkChanges() {
-    if (mutationTimer) clearTimeout(mutationTimer);
-    mutationTimer = setTimeout(() => {
-        const snapshot = generateSnapshot();
-        const json = JSON.stringify(snapshot);
+    const result = parseDOM();
+    const currentSnapshot = result.snapshot;
 
-        // Simple diff: if stringified JSON changed
-        if (json !== lastSnapshot) {
-            lastSnapshot = json;
-            console.log("DOM Changed, sending update.");
-            chrome.runtime.sendMessage({
-                action: "TARGET_UPDATE",
-                payload: { content: json, url: window.location.href }
-            });
-        }
-    }, 500); // Debounce 500ms
+    if (currentSnapshot !== lastSnapshot) {
+        lastSnapshot = currentSnapshot;
+
+        const payload = `[Target Update]\nURL: ${window.location.href}\nInteractive Elements:\n${currentSnapshot}`;
+
+        chrome.runtime.sendMessage({
+            action: "TARGET_UPDATE",
+            payload: payload,
+            elementIds: result.elementIds // Send IDs for optimization
+        });
+    }
 }
 
-const observer = new MutationObserver(checkChanges);
+// Debounce updates
+const observer = new MutationObserver(() => {
+    if (debounceTimer) clearTimeout(debounceTimer);
+    debounceTimer = setTimeout(checkChanges, 500); // 500ms debounce
+});
 
 
-// --- MESSAGING ---
+// --- 5. Message Listener ---
 
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     if (msg.action === "INIT_TARGET") {
@@ -199,13 +212,15 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         observer.observe(document.body, { subtree: true, childList: true, attributes: true, characterData: true });
     }
 
+    // Phase 5: Coordinate Resolution
     if (msg.action === "GET_COORDINATES") {
-        const id = msg.id;
-        const el = elementMap.get(parseInt(id));
+        const id = parseInt(msg.id); // Ensure int
+        const el = interactables[id];
+
         if (el) {
             const rect = el.getBoundingClientRect();
-            showOverlay(id, rect);
-            // Return center coordinates
+            showGreenOutline(id);
+            // Return center
             sendResponse({
                 x: rect.left + (rect.width / 2),
                 y: rect.top + (rect.height / 2),
@@ -214,16 +229,6 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         } else {
             sendResponse({ found: false });
         }
-        return true; // async response
-    }
-
-    // Fallback for direct execution if Debugger fails or not used
-    if (msg.action === "EXECUTE_COMMAND") {
-         // ... implementation for direct JS execution if needed
-    }
-
-    if (msg.action === "DISENGAGE_LOCAL") {
-        observer.disconnect();
-        window.location.reload();
+        return true;
     }
 });

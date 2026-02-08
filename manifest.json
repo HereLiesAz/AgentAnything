@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "AgentAnything",
-  "version": "1.0.0",
-  "description": "Autonomous multi-agent browser orchestration.",
+  "version": "2.0.0",
+  "description": "Autonomous multi-agent browser orchestration. V2.0",
   "permissions": [
     "scripting",
     "tabs",
@@ -44,7 +44,7 @@
         "https://gemini.google.com/*",
         "https://aistudio.google.com/*"
       ],
-      "js": ["content/agent_adapter.js"],
+      "js": ["content/agent_bridge.js"],
       "run_at": "document_idle"
     }
   ],

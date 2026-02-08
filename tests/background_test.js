@@ -1,124 +1,122 @@
 
 const assert = require('assert');
 
-// Mock Chrome Storage
+// Mock Chrome Storage Local
 const storage = {
-    session: {
+    local: {
         _data: {},
         get: async (keys) => {
-            if (typeof keys === 'string') return { [keys]: storage.session._data[keys] };
+            if (typeof keys === 'string') return { [keys]: storage.local._data[keys] };
             if (Array.isArray(keys)) {
                 let res = {};
-                keys.forEach(k => res[k] = storage.session._data[k]);
+                keys.forEach(k => res[k] = storage.local._data[k]);
                 return res;
             }
             if (typeof keys === 'object') {
                  let res = {};
                  for (let k in keys) {
-                     res[k] = storage.session._data[k] !== undefined ? storage.session._data[k] : keys[k];
+                     res[k] = storage.local._data[k] !== undefined ? storage.local._data[k] : keys[k];
                  }
                  return res;
             }
-            return storage.session._data;
+            return storage.local._data;
         },
         set: async (items) => {
-            Object.assign(storage.session._data, items);
+            Object.assign(storage.local._data, items);
+            // Trigger onChanged
+            if (storage.onChanged.listeners.length > 0) {
+                 storage.onChanged.listeners.forEach(fn => fn({
+                     commandQueue: { newValue: items.commandQueue }
+                 }, 'local'));
+            }
         },
-        remove: async (keys) => {
-             if (Array.isArray(keys)) keys.forEach(k => delete storage.session._data[k]);
-        },
-        clear: async () => { storage.session._data = {}; }
+    },
+    onChanged: {
+        listeners: [],
+        addListener: (fn) => storage.onChanged.listeners.push(fn)
     }
 };
 
 global.chrome = { storage };
 
-// --- Copy Background Logic (Simplified for testing) ---
-
+// --- Copy Background Logic (Simplified) ---
 const DEFAULT_STATE = {
     agentTabId: null,
-    targetTabs: [], // Array of objects
-    messageQueue: [],
-    isAgentBusy: false,
-    busySince: 0
+    targetTabs: [],
+    commandQueue: [],
+    isAgentBusy: false
 };
 
 async function getState() {
-    const data = await chrome.storage.session.get(DEFAULT_STATE);
+    const data = await chrome.storage.local.get(DEFAULT_STATE);
     if (!Array.isArray(data.targetTabs)) data.targetTabs = [];
+    if (!Array.isArray(data.commandQueue)) data.commandQueue = [];
     return { ...DEFAULT_STATE, ...data };
 }
 
 async function updateState(updates) {
-    await chrome.storage.session.set(updates);
+    await chrome.storage.local.set(updates);
 }
 
-// Mutex
-let stateMutex = Promise.resolve();
-async function withLock(fn) {
-    const next = stateMutex.then(async () => {
-        try { await fn(); } catch (e) { console.error(e); }
-    });
-    stateMutex = next;
-    return next;
-}
+// Minimal Queue Processor for Test (Simulating processQueue in background.js)
+async function processQueue(queue) {
+    if (!queue || queue.length === 0) return;
+    const item = queue[0];
 
-// Deadlock Logic from processQueue
-async function checkDeadlock() {
-    const state = await getState();
-    if (state.isAgentBusy) {
-        if (Date.now() - (state.busySince || 0) > 180000) {
-            await updateState({ isAgentBusy: false, busySince: 0 });
-            return true; // Unlocked
-        }
+    // Simulate processing
+    if (item.type === 'TEST_CMD') {
+        if (!global.processed) global.processed = 0;
+        global.processed++;
     }
-    return false;
+
+    // Dequeue - this triggers onChanged again in real logic
+    const remaining = queue.slice(1);
+    await updateState({ commandQueue: remaining });
 }
+
+// Mock Listener Registration
+chrome.storage.onChanged.addListener((changes, area) => {
+    if (area === 'local' && changes.commandQueue) {
+        processQueue(changes.commandQueue.newValue);
+    }
+});
+
 
 // --- TESTS ---
 
 async function runTests() {
-    console.log("Running Background Logic Tests...");
+    console.log("Running Background V2 Tests...");
 
-    // Test 1: State Persistence
-    await updateState({ agentTabId: 123 });
+    // Test 1: Storage Persistence
+    await updateState({ agentTabId: 999 });
     let state = await getState();
-    assert.strictEqual(state.agentTabId, 123, "Agent Tab ID should persist");
+    assert.strictEqual(state.agentTabId, 999, "Agent ID persists in local storage");
 
-    // Test 2: Deadlock Recovery
-    const now = Date.now();
-    await updateState({ isAgentBusy: true, busySince: now - 200000 }); // 3m 20s ago
-    const unlocked = await checkDeadlock();
+    // Test 2: Event Driven Queue
+    global.processed = 0;
+    // We need to break infinite recursion in mock because mock is synchronous mostly?
+    // Actually, async recursion is fine.
+
+    await updateState({ commandQueue: [{ type: 'TEST_CMD' }] });
+
+    // Wait for async processing chain
+    await new Promise(r => setTimeout(r, 100));
+
     state = await getState();
-    assert.strictEqual(unlocked, true, "Should detect deadlock");
-    assert.strictEqual(state.isAgentBusy, false, "Should auto-unlock");
+    assert.strictEqual(global.processed, 1, "Queue should process 1 item");
+    assert.strictEqual(state.commandQueue.length, 0, "Queue should be empty after processing");
 
-    // Test 3: No False Positive Deadlock
-    await updateState({ isAgentBusy: true, busySince: now - 10000 }); // 10s ago
-    const unlockedFalse = await checkDeadlock();
+    // Test 3: Multiple Items
+    global.processed = 0;
+    await updateState({ commandQueue: [{ type: 'TEST_CMD' }, { type: 'TEST_CMD' }] });
+
+    await new Promise(r => setTimeout(r, 200));
+
     state = await getState();
-    assert.strictEqual(unlockedFalse, false, "Should NOT detect deadlock yet");
-    assert.strictEqual(state.isAgentBusy, true, "Should remain locked");
+    assert.strictEqual(global.processed, 2, "Queue should process 2 items recursively");
+    assert.strictEqual(state.commandQueue.length, 0, "Queue empty");
 
-    // Test 4: Mutex Sequencing
-    let log = [];
-    const p1 = withLock(async () => {
-        await new Promise(r => setTimeout(r, 50));
-        log.push(1);
-    });
-    const p2 = withLock(async () => {
-        log.push(2);
-    });
-    await Promise.all([p1, p2]);
-    assert.deepStrictEqual(log, [1, 2], "Mutex should serialize execution order");
-
-    // Test 5: Target Tabs Structure
-    await updateState({ targetTabs: [{ tabId: 1, url: 'http://example.com', status: 'idle' }] });
-    state = await getState();
-    assert.strictEqual(state.targetTabs.length, 1, "Should have 1 target tab");
-    assert.strictEqual(state.targetTabs[0].url, 'http://example.com', "Should preserve target tab data");
-
-    console.log("All Background Tests Passed!");
+    console.log("All Background V2 Tests Passed!");
 }
 
 runTests().catch(e => {
