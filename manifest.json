@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "AgentAnything",
-  "version": "0.6.0",
-  "description": "Remote Control for AI Agents. Queue-Based Architecture.",
+  "version": "0.7.0",
+  "description": "Remote Control. Type-8 Safe Mode.",
   "permissions": [
     "activeTab",
     "scripting",
