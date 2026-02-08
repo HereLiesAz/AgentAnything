@@ -262,9 +262,8 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     if (msg.action === "AGENT_COMMAND") {
         // Collect all send promises
         const sendPromises = state.targetTabIds.map(tId =>
-            chrome.tabs.sendMessage(tId, { action: "EXECUTE_COMMAND", command: msg.payload })
-                .then(() => ({ id: tId, success: true }))
-                .catch(() => ({ id: tId, success: false }))
+            safeSendMessage(tId, { action: "EXECUTE_COMMAND", command: msg.payload })
+                .then(success => ({ id: tId, success }))
         );
 
         const results = await Promise.all(sendPromises);
