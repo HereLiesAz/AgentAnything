@@ -158,6 +158,15 @@ async function queueGenesisInstructions() {
     if (contextBlock) {
         await addToQueue("CORTEX_MEMORY", contextBlock);
     }
+
+    if (contextBlock) {
+        await addToQueue("CORTEX_MEMORY", contextBlock);
+    }
+}
+
+async function handleUserPrompt(userText) {
+    // Just queue the user prompt directly. Genesis should be pre-queued by ASSIGN_ROLE.
+    await addToQueue("USER", userText);
 }
 
 async function handleUserPrompt(userText) {
@@ -292,11 +301,24 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
     // GENESIS_INPUT_CAPTURED - The trigger for starting the loop
     if (msg.action === "GENESIS_INPUT_CAPTURED") {
-        await addToQueue("USER", msg.payload);
+        // Consolidate the Genesis Payload into a SINGLE message
+        state = await getState();
+        let genesisPayload = "";
 
-        // At this point, queue should have [SYSTEM_INIT, MEMORY, TARGET, USER]
-        // But we need to ensure we mark genesis as complete so future inputs are just appended
-        await updateState({ isGenesisComplete: true });
+        // Consume existing queue (System, Memory, Target)
+        state.messageQueue.forEach(item => {
+             if (item.source === "SYSTEM_INIT") genesisPayload += item.content + "\n\n";
+             else genesisPayload += `[${item.source}]\n${item.content}\n\n`;
+        });
+
+        // Add User Prompt
+        genesisPayload += `[USER REQUEST]\n${msg.payload}`;
+
+        // Replace queue with this single mega-message
+        await updateState({
+            messageQueue: [{ source: "GENESIS_MEGA_PAYLOAD", content: genesisPayload, timestamp: Date.now() }],
+            isGenesisComplete: true
+        });
 
         // Start the machine
         state = await getState();

@@ -6,6 +6,8 @@ let lastBodyLen = 0;
 let bootInterval = null;
 let activeInput = null; 
 let isWaitingForGenesisInput = true;
+let cachedSendButton = null;
+let cachedInput = null;
 
 // --- BOOTSTRAPPER ---
 function boot() {
@@ -103,15 +105,32 @@ function activateGenesisMode() {
     isWaitingForGenesisInput = true;
     setStatus("GENESIS MODE: TYPE & CLICK SUBMIT", "neon");
 
-    // Highlight best input immediately
+    // Highlight best input immediately AND aggressively poll
     const Heuristics = window.AA_Heuristics;
-    const input = Heuristics.findBestInput();
-    if (input) {
-        input.style.outline = "3px solid #00ff00";
-        input.placeholder = "TYPE COMMAND HERE & CLICK SEND BUTTON...";
-        input.focus();
-        activeInput = input;
+
+    function highlightInput() {
+        if (!isWaitingForGenesisInput) return; // Stop if captured
+        const input = Heuristics.findBestInput();
+        if (input) {
+            input.style.outline = "3px solid #00ff00";
+            // Only set placeholder if it's empty to avoid overwriting user typing if they started
+            if (!input.value) input.placeholder = "TYPE COMMAND HERE & CLICK SEND BUTTON...";
+            // We focus once, but don't steal focus repeatedly if user clicks away
+            if (document.activeElement !== input && !activeInput) {
+                input.focus();
+                activeInput = input;
+            }
+        }
     }
+
+    highlightInput(); // Run once immediately
+    const pollInterval = setInterval(() => {
+        if (!isWaitingForGenesisInput) {
+            clearInterval(pollInterval);
+        } else {
+            highlightInput();
+        }
+    }, 500); // Poll every 500ms until captured
 
     // Disable Enter Key during Genesis to force click
     window.addEventListener('keydown', (e) => {
@@ -127,22 +146,11 @@ function initAgent() {
     setStatus("AGENT: ASSIGNED", "blue");
     const Heuristics = window.AA_Heuristics;
 
-    // Highlight inputs immediately
-    document.addEventListener('mouseover', (e) => {
-        if (isWaitingForGenesisInput) {
-            const el = e.target;
-            if (['INPUT', 'TEXTAREA'].includes(el.tagName) || el.isContentEditable) {
-                el.style.outline = "2px dashed #00ff00";
-            }
-        }
-    }, true);
-
-    document.addEventListener('mouseout', (e) => {
-        if (isWaitingForGenesisInput) {
-            const el = e.target;
-            if (['INPUT', 'TEXTAREA'].includes(el.tagName) || el.isContentEditable) {
-                el.style.outline = "";
-            }
+    window.addEventListener('focus', (e) => {
+        if (['INPUT','TEXTAREA'].includes(e.target.tagName) || e.target.isContentEditable) {
+            activeInput = e.target;
+            // Maintain highlight if in genesis mode
+            if (isWaitingForGenesisInput) e.target.style.outline = "3px solid #00ff00";
         }
     }, true);
 
@@ -165,7 +173,13 @@ function initAgent() {
         ));
 
         if (btn) {
+            // Cache the button AND input during Genesis for reliable re-injection
             const input = activeInput || Heuristics.findBestInput();
+
+            if (isWaitingForGenesisInput) {
+                cachedSendButton = btn;
+                cachedInput = input;
+            }
             const val = input ? (input.value || input.innerText) : "";
             
             if (val && val.trim().length > 0) {
@@ -205,6 +219,7 @@ function triggerInterception(text, inputEl) {
 
     if (isWaitingForGenesisInput) {
         setStatus("GENESIS PROMPT CAPTURED", "neon");
+        inputEl.style.outline = ""; // Remove green outline immediately
         isWaitingForGenesisInput = false; // Lock UX
 
         // Disable interactions except scrolling
@@ -227,7 +242,7 @@ function triggerInterception(text, inputEl) {
 
 function injectAgentPrompt(text) {
     const Heuristics = window.AA_Heuristics;
-    const input = Heuristics.findBestInput();
+    const input = cachedInput || Heuristics.findBestInput();
     
     if (!input) {
         console.error("Input not found");
@@ -241,11 +256,16 @@ function injectAgentPrompt(text) {
     input.dispatchEvent(new InputEvent('input', { bubbles: true }));
 
     setTimeout(() => {
-        const btn = Heuristics.findSendButton();
-        if (btn) btn.click();
-        else input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', keyCode: 13, bubbles: true }));
+        const btn = cachedSendButton || Heuristics.findSendButton();
+        if (btn) {
+            console.log("[AgentAnything] Clicking send button:", btn);
+            btn.click();
+        } else {
+            console.warn("[AgentAnything] Send button not found. Using Enter fallback.");
+            input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', keyCode: 13, bubbles: true }));
+        }
         setStatus("AGENT: WORKING", "red");
-    }, 500);
+    }, 50); // Reduced delay for immediate execution
 }
 
 function observeAgentOutput() {
