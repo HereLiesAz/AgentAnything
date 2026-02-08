@@ -251,3 +251,12 @@ function parseCommands(text) {
 }
 
 function waitForSettledDOM(callback) {
+    let timer = null;
+    const observer = new MutationObserver(() => {
+        if (timer) clearTimeout(timer);
+        timer = setTimeout(() => { observer.disconnect(); callback(); }, 800);
+    });
+    observer.observe(document.body, { subtree: true, childList: true, attributes: true });
+    // Failsafe
+    setTimeout(() => { if(timer) clearTimeout(timer); observer.disconnect(); callback(); }, 3000);
+}
