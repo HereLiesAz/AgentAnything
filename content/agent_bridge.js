@@ -63,6 +63,16 @@ function setContentEditableValue(element, value) {
     }
 }
 
+// --- 3.3 Click Simulation ---
+function simulateClick(element) {
+    const options = { bubbles: true, cancelable: true, view: window };
+    const events = ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click'];
+    events.forEach(type => {
+        const Ctor = type.startsWith('pointer') ? PointerEvent : MouseEvent;
+        element.dispatchEvent(new Ctor(type, options));
+    });
+}
+
 
 // --- 3.4 Determining "Busy" State ---
 function isBusy() {
