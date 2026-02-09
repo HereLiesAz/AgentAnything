@@ -1,3 +1,4 @@
+(function() {
 // Agent Bridge - Specialized Input Injection Module (V2.0)
 console.log("[AgentAnything] Agent Bridge V2 Loaded");
 
@@ -224,3 +225,4 @@ function parseCommands(text) {
 
 // Start monitoring immediately
 startMonitoring();
+})();

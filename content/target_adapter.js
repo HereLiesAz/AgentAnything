@@ -1,3 +1,4 @@
+(function() {
 // Target Adapter - Semantic Parsing (V2.0)
 console.log("[AgentAnything] Target Adapter V2 Loaded");
 
@@ -263,3 +264,4 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         return true;
     }
 });
+})();
