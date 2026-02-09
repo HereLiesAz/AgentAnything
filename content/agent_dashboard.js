@@ -38,8 +38,20 @@ function ensureDashboard() {
                 margin-right: 5px;
             }
             .queue { color: #888; }
+            .blocker {
+                position: fixed;
+                top: 0; left: 0; width: 100vw; height: 100vh;
+                background: rgba(0,0,0,0.1);
+                z-index: 2147483646; /* Just below overlay */
+                cursor: not-allowed;
+                display: none;
+            }
         `;
         shadow.appendChild(style);
+
+        const blocker = document.createElement('div');
+        blocker.className = 'blocker';
+        shadow.appendChild(blocker);
 
         const panel = document.createElement('div');
         panel.className = 'panel';
@@ -55,8 +67,30 @@ function ensureDashboard() {
 
 function updateDashboard(state) {
     const root = ensureDashboard();
+    const statusEl = root.querySelector('.status');
     const queueEl = root.querySelector('.queue');
     const actionEl = root.querySelector('.last-action');
+    const blocker = root.querySelector('.blocker');
+
+    if (state.status) {
+        statusEl.innerHTML = `<span class="dot"></span>Bridge: ${state.status}`;
+        const dot = root.querySelector('.dot');
+
+        if (state.status === 'Linked') {
+            dot.style.background = '#00ff00';
+            blocker.style.display = 'block';
+        } else if (state.status.includes('Waiting')) {
+            dot.style.background = '#ffff00';
+            blocker.style.display = 'block';
+        } else {
+            dot.style.background = '#ff0000';
+            blocker.style.display = 'none'; // Allow user to fix issues
+        }
+
+        if (state.status === 'Idle') {
+             blocker.style.display = 'none';
+        }
+    }
 
     if (state.queueLength !== undefined) queueEl.innerText = `Queue: ${state.queueLength}`;
     if (state.lastAction) actionEl.innerText = state.lastAction;
