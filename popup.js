@@ -39,7 +39,8 @@ document.addEventListener('DOMContentLoaded', async () => {
     // 2. ASSIGN AGENT
     btnAgent.onclick = async () => {
         const tabs = await chrome.tabs.query({active: true, currentWindow: true});
-        chrome.runtime.sendMessage({ action: "ASSIGN_ROLE", role: "AGENT", tabId: tabs[0].id });
+        const task = document.getElementById('task-input').value.trim();
+        chrome.runtime.sendMessage({ action: "ASSIGN_ROLE", role: "AGENT", tabId: tabs[0].id, task: task });
         window.close();
     };
 
@@ -86,7 +87,15 @@ document.addEventListener('DOMContentLoaded', async () => {
     };
 
     btnKill.onclick = handleDisengage;
-    document.getElementById('btn-reset-setup').onclick = handleDisengage;
+
+    // Explicitly wire the Reset/Disengage button to sending DISENGAGE_ALL
+    const resetBtn = document.getElementById('btn-reset-setup');
+    if (resetBtn) {
+        resetBtn.onclick = () => {
+            chrome.runtime.sendMessage({ action: "DISENGAGE_ALL" });
+            setTimeout(() => location.reload(), 500);
+        };
+    }
     
     if(btnOptions) btnOptions.onclick = openOptions;
     if(btnOptionsActive) btnOptionsActive.onclick = openOptions;
