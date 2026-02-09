@@ -38,8 +38,20 @@ function ensureDashboard() {
                 margin-right: 5px;
             }
             .queue { color: #888; }
+            .blocker {
+                position: fixed;
+                top: 0; left: 0; width: 100vw; height: 100vh;
+                background: rgba(0,0,0,0.05);
+                z-index: 2147483646; /* Just below overlay */
+                pointer-events: none; /* Allows scrolling */
+                display: none;
+            }
         `;
         shadow.appendChild(style);
+
+        const blocker = document.createElement('div');
+        blocker.className = 'blocker';
+        shadow.appendChild(blocker);
 
         const panel = document.createElement('div');
         panel.className = 'panel';
@@ -53,11 +65,55 @@ function ensureDashboard() {
     return host._shadowRoot;
 }
 
+// Interaction Blocking
+function blockInteractions(enable) {
+    const events = ['click', 'mousedown', 'mouseup', 'keydown', 'keypress', 'keyup', 'submit', 'focus'];
+    const handler = (e) => {
+        e.stopPropagation();
+        e.preventDefault();
+    };
+
+    if (enable) {
+        events.forEach(ev => window.addEventListener(ev, handler, true));
+    } else {
+        events.forEach(ev => window.removeEventListener(ev, handler, true));
+    }
+}
+
+let isBlocked = false;
+
 function updateDashboard(state) {
     const root = ensureDashboard();
     const statusEl = root.querySelector('.status');
     const queueEl = root.querySelector('.queue');
     const actionEl = root.querySelector('.last-action');
+    const blocker = root.querySelector('.blocker');
+
+    if (state.status) {
+        statusEl.innerHTML = `<span class="dot"></span>Bridge: ${state.status}`;
+        const dot = root.querySelector('.dot');
+
+        let shouldBlock = false;
+        if (state.status === 'Linked' || state.status.includes('Waiting')) {
+            dot.style.background = (state.status === 'Linked') ? '#00ff00' : '#ffff00';
+            blocker.style.display = 'block';
+            shouldBlock = true;
+        } else {
+            dot.style.background = '#ff0000';
+            blocker.style.display = 'none';
+            shouldBlock = false;
+        }
+
+        if (state.status === 'Idle') {
+             blocker.style.display = 'none';
+             shouldBlock = false;
+        }
+
+        if (shouldBlock !== isBlocked) {
+            isBlocked = shouldBlock;
+            blockInteractions(isBlocked);
+        }
+    }
 
     if (state.status) {
         statusEl.innerHTML = `<span class="dot"></span>Bridge: ${state.status}`;

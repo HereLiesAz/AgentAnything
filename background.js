@@ -53,12 +53,10 @@ const DEFAULT_STATE = {
 // State Mutex
 let stateLock = Promise.resolve();
 async function withLock(fn) {
-    let release;
-    const acquire = new Promise(resolve => release = resolve);
     const currentLock = stateLock;
     stateLock = (async () => {
-        await currentLock;
-        try { await fn(); } finally { release(); }
+        try { await currentLock; } catch (e) { console.error("Lock recovery:", e); }
+        try { await fn(); } catch (e) { console.error("Lock task failed:", e); }
     })();
     return stateLock;
 }
@@ -308,7 +306,8 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
                     if (state.agentTabId === tid) return;
 
                     const targets = state.targetTabs.filter(t => t.tabId !== tid);
-                    const initialPrompt = "You are an autonomous agent. I will feed you the state of another tab. Output commands like `interact` to interact.";
+                    const taskDescription = msg.task ? `\n\nYOUR GOAL: ${msg.task}` : "";
+                    const initialPrompt = `You are an autonomous agent. I will feed you the state of another tab. Output commands like \`interact\` to interact.${taskDescription}`;
 
                     await updateState({
                         agentTabId: tid,
@@ -351,6 +350,25 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
             log("[System] User Interruption Detected. Clearing Queue.");
             await updateState({ commandQueue: [], lastActionTimestamp: 0 });
             await enqueue({ type: 'UPDATE_AGENT', payload: "System: User manually interacted with the page. Queue cleared. Please re-assess state." });
+        }
+
+        if (msg.action === "DISENGAGE_ALL") {
+            log("[System] Disengaging all tabs.");
+            await withLock(async () => {
+                const s = await getState();
+                // Notify before clearing
+                const payload = { status: "Idle", queueLength: 0, lastAction: "Disengaged" };
+                if (s.agentTabId) sendMessageToTab(s.agentTabId, { action: "DASHBOARD_UPDATE", payload });
+                s.targetTabs.forEach(t => sendMessageToTab(t.tabId, { action: "DASHBOARD_UPDATE", payload }));
+
+                await updateState({
+                    agentTabId: null,
+                    targetTabs: [],
+                    commandQueue: [],
+                    elementMap: {},
+                    lastActionTimestamp: 0
+                });
+            });
         }
 
     })();
