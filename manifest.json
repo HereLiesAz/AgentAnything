@@ -44,7 +44,7 @@
         "https://gemini.google.com/*",
         "https://aistudio.google.com/*"
       ],
-      "js": ["content/agent_bridge.js"],
+      "js": ["content/agent_bridge.js", "content/agent_dashboard.js"],
       "run_at": "document_idle"
     }
   ],
