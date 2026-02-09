@@ -195,6 +195,13 @@ async function checkTimeout() {
     }
 }
 
+// --- 5. Message Routing ---
+
+async function sendMessageToTab(tabId, message) {
+    try {
+        return await chrome.tabs.sendMessage(tabId, message);
+    } catch (e) { return null; }
+}
 
 // --- 4. Execution Engine ---
 
