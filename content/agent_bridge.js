@@ -36,6 +36,30 @@ function getProvider() {
 const PROVIDER = getProvider();
 console.log(`[AgentAnything] Bridge Active for: ${PROVIDER}`);
 
+// --- 2.1 Observation Mode State ---
+let observationMode = false;
+let sessionKeyword = null;
+let learnedSelectors = { input: null, submit: null };
+let potentialSelectors = { input: null, submit: null };
+
+// Capture candidates
+window.addEventListener('click', (e) => {
+    if (observationMode) potentialSelectors.submit = e.target;
+}, true);
+
+window.addEventListener('focus', (e) => {
+    if (observationMode) {
+        const t = e.target;
+        if (t.isContentEditable || t.tagName === 'INPUT' || t.tagName === 'TEXTAREA') {
+            potentialSelectors.input = t;
+        }
+    }
+}, true);
+window.addEventListener('input', (e) => {
+    if (observationMode) potentialSelectors.input = e.target;
+}, true);
+
+
 // --- 3. React Injection Logic (Phase 1) ---
 function setReactValue(element, value) {
     element.focus();
@@ -63,6 +87,20 @@ function setContentEditableValue(element, value) {
     }
 }
 
+// --- 3.3 Click Simulation ---
+function simulateClick(element) {
+    const options = { bubbles: true, cancelable: true, view: window };
+    const hasPointer = typeof PointerEvent !== 'undefined';
+    const events = hasPointer ?
+        ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click'] :
+        ['mousedown', 'mouseup', 'click'];
+
+    events.forEach(type => {
+        const Ctor = hasPointer && type.startsWith('pointer') ? PointerEvent : MouseEvent;
+        element.dispatchEvent(new Ctor(type, options));
+    });
+}
+
 
 // --- 3.4 Determining "Busy" State ---
 function isBusy() {
@@ -76,6 +114,17 @@ function isBusy() {
 
 // --- 4. Message Listener (Phase 1) ---
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
+    if (request.action === "INIT_AGENT") {
+        if (request.keyword) {
+            sessionKeyword = request.keyword;
+            observationMode = true;
+            // Reset learned selectors for new session
+            learnedSelectors = { input: null, submit: null };
+            potentialSelectors = { input: null, submit: null };
+            console.log(`[AgentAnything] Observation Mode Active. Keyword: ${sessionKeyword}`);
+        }
+    }
+
     // Direct Execution
     if (request.action === "EXECUTE_PROMPT") {
         executePrompt(request.text);
@@ -95,7 +144,12 @@ async function executePrompt(text) {
     const config = SELECTORS[PROVIDER];
     if (!config) return;
 
-    let inputEl = document.querySelector(config.input);
+    // Attempt Copy if in Observation Mode
+    if (observationMode) {
+        navigator.clipboard.writeText(text).catch(e => console.warn("Clipboard write failed", e));
+    }
+
+    let inputEl = learnedSelectors.input || document.querySelector(config.input);
     if (!inputEl) {
         console.error("Input not found");
         return;
@@ -109,23 +163,41 @@ async function executePrompt(text) {
 
     // Polling for submission (Robust Strategy)
     const startTime = Date.now();
+    let lastRetryTimestamp = 0;
+
     const interval = setInterval(() => {
-        const btn = document.querySelector(config.submit) ||
-                    document.querySelector('button[aria-label="Send message"]') ||
-                    document.querySelector('button[data-testid="send-button"]');
+        const now = Date.now();
+        const elapsed = now - startTime;
+
+        let btn = learnedSelectors.submit;
+        if (!btn) {
+            btn = document.querySelector(config.submit) ||
+                  document.querySelector('button[aria-label="Send message"]') ||
+                  document.querySelector('button[data-testid="send-button"]');
+        }
 
         if (btn && !btn.disabled) {
             clearInterval(interval);
-            btn.click();
+            simulateClick(btn);
             console.log("[AgentAnything] Prompt submitted via button click");
-        } else if (Date.now() - startTime > 5000) {
-            clearInterval(interval);
-            // Fallback Enter
-            console.warn("[AgentAnything] Button not ready, forcing Enter key");
-            const eventOpts = { key: 'Enter', code: 'Enter', keyCode: 13, bubbles: true, cancelable: true, view: window, composed: true };
-            inputEl.dispatchEvent(new KeyboardEvent('keydown', eventOpts));
-            inputEl.dispatchEvent(new KeyboardEvent('keypress', eventOpts));
-            inputEl.dispatchEvent(new KeyboardEvent('keyup', eventOpts));
+        } else {
+            // Timeout or Retry Logic
+            if (elapsed > 5000) {
+                clearInterval(interval);
+                // Fallback Enter
+                console.warn("[AgentAnything] Button not ready, forcing Enter key");
+                const eventOpts = { key: 'Enter', code: 'Enter', keyCode: 13, bubbles: true, cancelable: true, view: window, composed: true };
+                inputEl.dispatchEvent(new KeyboardEvent('keydown', eventOpts));
+                inputEl.dispatchEvent(new KeyboardEvent('keypress', eventOpts));
+                inputEl.dispatchEvent(new KeyboardEvent('keyup', eventOpts));
+            } else if (btn && btn.disabled && (elapsed > 2000)) {
+                 // If button disabled for > 2s, retry input event to wake up UI
+                 if (now - lastRetryTimestamp > 1000) { // Retry every > 1s
+                     lastRetryTimestamp = now;
+                     console.log("[AgentAnything] Button disabled, re-dispatching input");
+                     inputEl.dispatchEvent(new Event('input', { bubbles: true }));
+                 }
+            }
         }
     }, 100);
 }
@@ -189,6 +261,21 @@ function startMonitoring() {
             const text = lastMsgEl.innerText;
             if (text !== lastMessageText) {
                 lastMessageText = text;
+
+                // Check for Session Keyword (Observation Mode)
+                if (observationMode && sessionKeyword && text.includes(sessionKeyword)) {
+                    console.log("[AgentAnything] Session Keyword Detected!");
+                    observationMode = false;
+
+                    // Commit learned selectors
+                    if (potentialSelectors.submit) learnedSelectors.submit = potentialSelectors.submit;
+                    if (potentialSelectors.input) learnedSelectors.input = potentialSelectors.input;
+
+                    if (chrome.runtime?.id) {
+                         chrome.runtime.sendMessage({ action: "INTRO_COMPLETE" }).catch(() => {});
+                    }
+                }
+
                 parseCommands(text);
             }
         }

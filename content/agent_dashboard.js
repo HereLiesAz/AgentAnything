@@ -105,8 +105,13 @@ function updateDashboard(state) {
         // Logic for blocking: If Linked or Waiting, block.
         // Status might be "Working" (Green), "Linked (Waiting)" (Yellow), "Waiting for..." (Yellow)
         if (state.status.includes('Linked') || state.status.includes('Waiting') || state.status === 'Working') {
-            blocker.style.display = 'block';
-            shouldBlock = true;
+            if (state.allowInput) {
+                blocker.style.display = 'none';
+                shouldBlock = false;
+            } else {
+                blocker.style.display = 'block';
+                shouldBlock = true;
+            }
         } else {
             blocker.style.display = 'none';
             shouldBlock = false;
