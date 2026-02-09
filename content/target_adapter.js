@@ -6,7 +6,7 @@ console.log("[AgentAnything] Target Adapter V2 Loaded");
 let interactables = {};
 let nextId = 1;
 let lastSnapshot = "";
-let debounceTimer = null;
+let targetDebounceTimer = null;
 let apiCalls = []; // Captured API calls
 
 // --- 2. Overlay (Phase 2) ---
@@ -209,18 +209,20 @@ function checkChanges() {
 
         const payload = `[Target Update]\nURL: ${window.location.href}\nInteractive Elements:\n${currentSnapshot}`;
 
-        chrome.runtime.sendMessage({
-            action: "TARGET_UPDATE",
-            payload: payload,
-            elementIds: result.elementIds
-        });
+        if (chrome.runtime?.id) {
+            chrome.runtime.sendMessage({
+                action: "TARGET_UPDATE",
+                payload: payload,
+                elementIds: result.elementIds
+            }).catch(() => {});
+        }
     }
 }
 
 // Debounce updates
 const observer = new MutationObserver(() => {
-    if (debounceTimer) clearTimeout(debounceTimer);
-    debounceTimer = setTimeout(checkChanges, 500); // 500ms debounce
+    if (targetDebounceTimer) clearTimeout(targetDebounceTimer);
+    targetDebounceTimer = setTimeout(checkChanges, 500); // 500ms debounce
 });
 
 
@@ -229,7 +231,9 @@ const observer = new MutationObserver(() => {
 function handleUserInteraction() {
     if (this._interruptTimer) return;
     this._interruptTimer = setTimeout(() => { this._interruptTimer = null; }, 1000);
-    chrome.runtime.sendMessage({ action: "USER_INTERRUPT" });
+    if (chrome.runtime?.id) {
+        chrome.runtime.sendMessage({ action: "USER_INTERRUPT" }).catch(() => {});
+    }
 }
 
 window.addEventListener('mousedown', handleUserInteraction, true);
