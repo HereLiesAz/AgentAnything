@@ -312,7 +312,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
                     await updateState({
                         agentTabId: tid,
                         targetTabs: targets,
-                        commandQueue: [], // Queue is empty, prompt sent immediately
+                        // commandQueue: [], // Preserve existing queue (e.g. Target Maps)
                         elementMap: {},
                         lastActionTimestamp: 0
                     });
@@ -354,9 +354,28 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
         // Handle User Interruption
         if (msg.action === "USER_INTERRUPT") {
-            log("[System] User Interruption Detected. Clearing Queue.");
-            await updateState({ commandQueue: [], lastActionTimestamp: 0 });
-            await enqueue({ type: 'UPDATE_AGENT', payload: "System: User manually interacted with the page. Queue cleared. Please re-assess state." });
+            log("[System] User Interruption Detected. Ignoring.");
+            // await updateState({ commandQueue: [], lastActionTimestamp: 0 });
+            // await enqueue({ type: 'UPDATE_AGENT', payload: "System: User manually interacted with the page. Queue cleared. Please re-assess state." });
+        }
+
+        if (msg.action === "DISENGAGE_ALL") {
+            log("[System] Disengaging all tabs.");
+            await withLock(async () => {
+                const s = await getState();
+                // Notify before clearing
+                const payload = { status: "Idle", queueLength: 0, lastAction: "Disengaged" };
+                if (s.agentTabId) sendMessageToTab(s.agentTabId, { action: "DASHBOARD_UPDATE", payload });
+                s.targetTabs.forEach(t => sendMessageToTab(t.tabId, { action: "DASHBOARD_UPDATE", payload }));
+
+                await updateState({
+                    agentTabId: null,
+                    targetTabs: [],
+                    commandQueue: [],
+                    elementMap: {},
+                    lastActionTimestamp: 0
+                });
+            });
         }
 
         if (msg.action === "DISENGAGE_ALL") {
