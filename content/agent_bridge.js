@@ -104,19 +104,24 @@ async function executePrompt(text) {
         setContentEditableValue(inputEl, text);
     }
 
-    // Wait slightly for validation then click submit
-    setTimeout(() => {
+    // Polling for submission (Robust Strategy)
+    const startTime = Date.now();
+    const interval = setInterval(() => {
         const btn = document.querySelector(config.submit) ||
                     document.querySelector('button[aria-label="Send message"]') ||
                     document.querySelector('button[data-testid="send-button"]');
 
         if (btn && !btn.disabled) {
+            clearInterval(interval);
             btn.click();
-        } else {
+            console.log("[AgentAnything] Prompt submitted via button click");
+        } else if (Date.now() - startTime > 2000) {
+            clearInterval(interval);
             // Fallback Enter
+            console.warn("[AgentAnything] Button not ready, forcing Enter key");
             inputEl.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, bubbles: true }));
         }
-    }, 300);
+    }, 100);
 }
 
 
