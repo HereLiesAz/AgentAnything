@@ -50,6 +50,19 @@ const DEFAULT_STATE = {
     lastActionTimestamp: 0
 };
 
+// State Mutex
+let stateLock = Promise.resolve();
+async function withLock(fn) {
+    let release;
+    const acquire = new Promise(resolve => release = resolve);
+    const currentLock = stateLock;
+    stateLock = (async () => {
+        await currentLock;
+        try { await fn(); } finally { release(); }
+    })();
+    return stateLock;
+}
+
 async function getState() {
     const data = await chrome.storage.local.get(DEFAULT_STATE);
     if (!Array.isArray(data.targetTabs)) data.targetTabs = [];
@@ -60,6 +73,7 @@ async function getState() {
 
 async function updateState(updates) {
     await chrome.storage.local.set(updates);
+    broadcastStatus(updates); // Auto-broadcast on state update
 }
 
 // --- 2. Keep-Alive ---
@@ -112,16 +126,17 @@ async function processQueue(queue) {
         // Enforce Privacy Acceptance
         if (!CONFIG.privacyAccepted) {
             console.warn("[System] Privacy Warning not accepted. Blocking command.");
-            await updateState({ commandQueue: queue.slice(1) }); // Remove
+            await withLock(async () => {
+                const s = await getState();
+                if (s.commandQueue.length > 0) await updateState({ commandQueue: s.commandQueue.slice(1) });
+            });
             chrome.tabs.create({ url: 'welcome.html' });
-
-            isProcessing = false;
             return;
         }
 
         log(`[Queue] Processing: ${item.type}`);
 
-        const state = await getState();
+        let state = await getState();
         const agentId = state.agentTabId;
 
         if (item.type === 'UPDATE_AGENT') {
@@ -132,7 +147,8 @@ async function processQueue(queue) {
                     text: safePayload
                 });
 
-                await updateState({ lastActionTimestamp: 0 });
+                // Update timestamp safe
+                await withLock(async () => { await updateState({ lastActionTimestamp: 0 }); });
             }
         }
 
@@ -161,7 +177,7 @@ async function processQueue(queue) {
                          await executeBackgroundType(t.tabId, res.x, res.y, cmd.value);
                      }
                      executed = true;
-                     await updateState({ lastActionTimestamp: Date.now() });
+                     await withLock(async () => { await updateState({ lastActionTimestamp: Date.now() }); });
                      break;
                  }
              }
@@ -172,8 +188,13 @@ async function processQueue(queue) {
              }
         }
 
-        const remaining = queue.slice(1);
-        await updateState({ commandQueue: remaining });
+        // Safe Removal
+        await withLock(async () => {
+            const s = await getState();
+            if (s.commandQueue.length > 0) {
+                 await updateState({ commandQueue: s.commandQueue.slice(1) });
+            }
+        });
 
     } catch (e) {
         console.error("Queue Processing Error:", e);
@@ -245,6 +266,23 @@ async function sendMessageToTab(tabId, message) {
     } catch (e) { return null; }
 }
 
+async function broadcastStatus(changes) {
+    const state = await getState();
+    let status = "Idle";
+    if (state.agentTabId && state.targetTabs.length > 0) status = "Linked";
+    else if (state.agentTabId) status = "Waiting for Target";
+    else if (state.targetTabs.length > 0) status = "Waiting for Agent";
+
+    const payload = {
+        status: status,
+        queueLength: state.commandQueue.length,
+        lastAction: state.lastActionTimestamp ? "Active" : "Waiting..."
+    };
+
+    if (state.agentTabId) sendMessageToTab(state.agentTabId, { action: "DASHBOARD_UPDATE", payload });
+    state.targetTabs.forEach(t => sendMessageToTab(t.tabId, { action: "DASHBOARD_UPDATE", payload }));
+}
+
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     (async () => {
         let state = await getState();
@@ -259,32 +297,40 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         }
 
         if (msg.action === "ASSIGN_ROLE") {
-            const role = msg.role;
-            const tid = msg.tabId;
+            await withLock(async () => {
+                // Refresh state inside lock
+                state = await getState();
+                const role = msg.role;
+                const tid = msg.tabId;
 
-            if (role === 'AGENT') {
-                const targets = state.targetTabs.filter(t => t.tabId !== tid);
-                await updateState({
-                    agentTabId: tid,
-                    targetTabs: targets,
-                    commandQueue: [],
-                    elementMap: {},
-                    lastActionTimestamp: 0
-                });
-                sendMessageToTab(tid, { action: "INIT_AGENT" });
+                if (role === 'AGENT') {
+                    // Prevent duplicate init
+                    if (state.agentTabId === tid) return;
 
-                const initialPrompt = "You are an autonomous agent. I will feed you the state of another tab. Output commands like `interact` to interact.";
-                await enqueue({ type: 'UPDATE_AGENT', payload: initialPrompt });
+                    const targets = state.targetTabs.filter(t => t.tabId !== tid);
+                    const initialPrompt = "You are an autonomous agent. I will feed you the state of another tab. Output commands like `interact` to interact.";
 
-            } else {
-                let targets = [...state.targetTabs];
-                if (!targets.some(t => t.tabId === tid)) {
+                    await updateState({
+                        agentTabId: tid,
+                        targetTabs: targets,
+                        commandQueue: [{ type: 'UPDATE_AGENT', payload: initialPrompt }],
+                        elementMap: {},
+                        lastActionTimestamp: 0
+                    });
+                    sendMessageToTab(tid, { action: "INIT_AGENT" });
+
+                } else {
+                    // Check if already assigned
+                    if (state.targetTabs.some(t => t.tabId === tid)) return;
+
+                    let targets = [...state.targetTabs];
                     targets.push({ tabId: tid, url: sender.tab?.url || "" });
+
+                    const agent = state.agentTabId === tid ? null : state.agentTabId;
+                    await updateState({ targetTabs: targets, agentTabId: agent });
+                    sendMessageToTab(tid, { action: "INIT_TARGET", config: CONFIG });
                 }
-                const agent = state.agentTabId === tid ? null : state.agentTabId;
-                await updateState({ targetTabs: targets, agentTabId: agent });
-                sendMessageToTab(tid, { action: "INIT_TARGET", config: CONFIG });
-            }
+            });
         }
 
         if (msg.action === "TARGET_UPDATE") {
@@ -312,7 +358,9 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 });
 
 async function enqueue(item) {
-    const state = await getState();
-    const q = [...state.commandQueue, item];
-    await updateState({ commandQueue: q });
+    await withLock(async () => {
+        const state = await getState();
+        const q = [...state.commandQueue, item];
+        await updateState({ commandQueue: q });
+    });
 }
