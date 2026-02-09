@@ -312,11 +312,18 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
                     await updateState({
                         agentTabId: tid,
                         targetTabs: targets,
-                        commandQueue: [{ type: 'UPDATE_AGENT', payload: initialPrompt }],
+                        commandQueue: [], // Queue is empty, prompt sent immediately
                         elementMap: {},
                         lastActionTimestamp: 0
                     });
+
                     sendMessageToTab(tid, { action: "INIT_AGENT" });
+
+                    // Immediate execution of first prompt (Bypass Queue)
+                    const safePayload = `<browsing_context>\n${initialPrompt}\n</browsing_context>`;
+                    setTimeout(() => {
+                        sendMessageToTab(tid, { action: "EXECUTE_PROMPT", text: safePayload });
+                    }, 500); // Small delay to ensure INIT is processed
 
                 } else {
                     // Check if already assigned
