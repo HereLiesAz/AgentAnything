@@ -122,7 +122,10 @@ async function executePrompt(text) {
             clearInterval(interval);
             // Fallback Enter
             console.warn("[AgentAnything] Button not ready, forcing Enter key");
-            inputEl.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, bubbles: true }));
+            const eventOpts = { key: 'Enter', code: 'Enter', keyCode: 13, bubbles: true, cancelable: true, view: window, composed: true };
+            inputEl.dispatchEvent(new KeyboardEvent('keydown', eventOpts));
+            inputEl.dispatchEvent(new KeyboardEvent('keypress', eventOpts));
+            inputEl.dispatchEvent(new KeyboardEvent('keyup', eventOpts));
         }
     }, 100);
 }
