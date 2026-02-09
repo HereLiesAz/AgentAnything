@@ -378,25 +378,6 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
             });
         }
 
-        if (msg.action === "DISENGAGE_ALL") {
-            log("[System] Disengaging all tabs.");
-            await withLock(async () => {
-                const s = await getState();
-                // Notify before clearing
-                const payload = { status: "Idle", queueLength: 0, lastAction: "Disengaged" };
-                if (s.agentTabId) sendMessageToTab(s.agentTabId, { action: "DASHBOARD_UPDATE", payload });
-                s.targetTabs.forEach(t => sendMessageToTab(t.tabId, { action: "DASHBOARD_UPDATE", payload }));
-
-                await updateState({
-                    agentTabId: null,
-                    targetTabs: [],
-                    commandQueue: [],
-                    elementMap: {},
-                    lastActionTimestamp: 0
-                });
-            });
-        }
-
     })();
     return true;
 });

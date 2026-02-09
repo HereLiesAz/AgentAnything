@@ -38,13 +38,16 @@ console.log(`[AgentAnything] Bridge Active for: ${PROVIDER}`);
 
 // --- 3. React Injection Logic (Phase 1) ---
 function setReactValue(element, value) {
+    element.focus();
     const lastValue = element.value;
     element.value = value;
     const event = new Event('input', { bubbles: true });
+    const changeEvent = new Event('change', { bubbles: true });
     // Hack to trigger React's internal state tracker
     const tracker = element._valueTracker;
     if (tracker) { tracker.setValue(lastValue); }
     element.dispatchEvent(event);
+    element.dispatchEvent(changeEvent);
 }
 
 // --- 3.2 ContentEditable Injection Logic ---
@@ -115,7 +118,7 @@ async function executePrompt(text) {
             clearInterval(interval);
             btn.click();
             console.log("[AgentAnything] Prompt submitted via button click");
-        } else if (Date.now() - startTime > 2000) {
+        } else if (Date.now() - startTime > 5000) {
             clearInterval(interval);
             // Fallback Enter
             console.warn("[AgentAnything] Button not ready, forcing Enter key");
