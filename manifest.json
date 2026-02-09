@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "AgentAnything",
-  "version": "0.24.1",
+  "version": "0.24.3",
   "description": "Autonomous multi-agent browser orchestration. V2.4 (REST API Tool)",
   "permissions": [
     "scripting",

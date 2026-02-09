@@ -110,11 +110,6 @@ async function processQueue(queue) {
         // Enforce Privacy Acceptance
         if (!CONFIG.privacyAccepted) {
             console.warn("[System] Privacy Warning not accepted. Blocking command.");
-            // Open welcome page again if needed? Or just ignore?
-            // Dequeue to prevent loop? Or notify user?
-            // Notify user via alert?
-            // Let's remove from queue and open welcome page.
-
             await updateState({ commandQueue: queue.slice(1) }); // Remove
             chrome.tabs.create({ url: 'welcome.html' });
 
@@ -195,13 +190,7 @@ async function checkTimeout() {
     }
 }
 
-// --- 5. Message Routing ---
-
-async function sendMessageToTab(tabId, message) {
-    try {
-        return await chrome.tabs.sendMessage(tabId, message);
-    } catch (e) { return null; }
-}
+// --- 4. Execution Engine ---
 
 // --- 4. Execution Engine ---
 
@@ -247,6 +236,7 @@ async function executeBackgroundType(tabId, x, y, value) {
 
 // --- 5. Message Routing ---
 
+// sendMessageToTab was declared twice in the previous version. Removed the second declaration.
 async function sendMessageToTab(tabId, message) {
     try {
         return await chrome.tabs.sendMessage(tabId, message);
