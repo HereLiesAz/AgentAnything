@@ -2,10 +2,10 @@
 console.log("[AgentAnything] Background Service Worker V2 Loaded");
 
 // --- Configuration (Options) ---
-let CONFIG = { redactPII: true, debugMode: false };
+let CONFIG = { redactPII: true, debugMode: false, privacyAccepted: false };
 
 async function loadConfig() {
-    const items = await chrome.storage.sync.get({ redactPII: true, debugMode: false });
+    const items = await chrome.storage.sync.get({ redactPII: true, debugMode: false, privacyAccepted: false });
     CONFIG = items;
     log("[System] Config Loaded:", CONFIG);
 }
@@ -15,12 +15,25 @@ function log(msg, ...args) {
 }
 
 chrome.runtime.onStartup.addListener(loadConfig);
+chrome.runtime.onInstalled.addListener(() => {
+    chrome.storage.session.setAccessLevel({ accessLevel: 'TRUSTED_AND_UNTRUSTED_CONTEXTS' });
+
+    // Onboarding
+    chrome.storage.sync.get(['privacyAccepted'], (res) => {
+        if (!res.privacyAccepted) {
+            chrome.tabs.create({ url: 'welcome.html' });
+        }
+    });
+    loadConfig();
+});
+
 loadConfig();
 
 chrome.storage.onChanged.addListener((changes, area) => {
     if (area === 'sync') {
         if (changes.redactPII) CONFIG.redactPII = changes.redactPII.newValue;
         if (changes.debugMode) CONFIG.debugMode = changes.debugMode.newValue;
+        if (changes.privacyAccepted) CONFIG.privacyAccepted = changes.privacyAccepted.newValue;
         log("[System] Config Updated:", CONFIG);
     }
 });
@@ -34,7 +47,7 @@ const DEFAULT_STATE = {
     isAgentBusy: false,
     busySince: 0,
     elementMap: {},
-    lastActionTimestamp: 0 // Track action time for timeout
+    lastActionTimestamp: 0
 };
 
 async function getState() {
@@ -67,7 +80,7 @@ function startKeepAlive() {
   if (keepAliveInterval) clearInterval(keepAliveInterval);
   keepAliveInterval = setInterval(() => {
     chrome.runtime.sendMessage({ target: 'offscreen', action: 'ping' });
-    checkTimeout(); // Check for action timeouts
+    checkTimeout();
   }, 20000);
 }
 chrome.runtime.onStartup.addListener(startKeepAlive);
@@ -94,6 +107,21 @@ async function processQueue(queue) {
         const item = queue[0];
         if (!item) { isProcessing = false; return; }
 
+        // Enforce Privacy Acceptance
+        if (!CONFIG.privacyAccepted) {
+            console.warn("[System] Privacy Warning not accepted. Blocking command.");
+            // Open welcome page again if needed? Or just ignore?
+            // Dequeue to prevent loop? Or notify user?
+            // Notify user via alert?
+            // Let's remove from queue and open welcome page.
+
+            await updateState({ commandQueue: queue.slice(1) }); // Remove
+            chrome.tabs.create({ url: 'welcome.html' });
+
+            isProcessing = false;
+            return;
+        }
+
         log(`[Queue] Processing: ${item.type}`);
 
         const state = await getState();
@@ -107,7 +135,6 @@ async function processQueue(queue) {
                     text: safePayload
                 });
 
-                // Clear timeout logic since we got an update
                 await updateState({ lastActionTimestamp: 0 });
             }
         }
@@ -137,7 +164,6 @@ async function processQueue(queue) {
                          await executeBackgroundType(t.tabId, res.x, res.y, cmd.value);
                      }
                      executed = true;
-                     // Set timestamp for timeout check
                      await updateState({ lastActionTimestamp: Date.now() });
                      break;
                  }
@@ -145,7 +171,6 @@ async function processQueue(queue) {
 
              if (!executed) {
                  log(`[System] Failed to execute command. Element ID ${cmd.id} not found.`);
-                 // Inform agent of failure
                  await enqueue({ type: 'UPDATE_AGENT', payload: `System Error: Element ID ${cmd.id} not found.` });
              }
         }
@@ -170,6 +195,13 @@ async function checkTimeout() {
     }
 }
 
+// --- 5. Message Routing ---
+
+async function sendMessageToTab(tabId, message) {
+    try {
+        return await chrome.tabs.sendMessage(tabId, message);
+    } catch (e) { return null; }
+}
 
 // --- 4. Execution Engine ---
 

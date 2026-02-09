@@ -6,6 +6,7 @@ let interactables = {};
 let nextId = 1;
 let lastSnapshot = "";
 let debounceTimer = null;
+let apiCalls = []; // Captured API calls
 
 // --- 2. Overlay (Phase 2) ---
 
@@ -86,12 +87,14 @@ function parseDOM() {
     let output = [];
     let elementIds = [];
 
+    // Use TreeWalker (V2 Requirement)
     const walker = document.createTreeWalker(
         document.body,
         NodeFilter.SHOW_ELEMENT,
         {
             acceptNode: (node) => {
                 const tag = node.tagName.toLowerCase();
+                // "ignoring <script>, <style>, and hidden elements"
                 if (['script', 'style', 'noscript', 'meta', 'link', 'svg', 'path'].includes(tag)) return NodeFilter.FILTER_REJECT;
 
                 const style = window.getComputedStyle(node);
@@ -166,11 +169,39 @@ function parseDOM() {
 }
 
 
-// --- 4. Diffing & Updates (Phase 2) ---
+// --- 4. Network Monitoring (V2.4) ---
+
+function injectNetworkHook() {
+    const script = document.createElement('script');
+    script.src = chrome.runtime.getURL('content/network_hook.js');
+    script.onload = function() { this.remove(); };
+    (document.head || document.documentElement).appendChild(script);
+
+    window.addEventListener('message', (event) => {
+        if (event.source !== window || !event.data || event.data.source !== 'AA_NETWORK_HOOK') return;
+        const call = event.data.payload;
+        // Buffer latest 5 calls
+        apiCalls.unshift(call);
+        if (apiCalls.length > 5) apiCalls.pop();
+        checkChanges(); // Trigger update immediately on API call
+    });
+}
+
+
+// --- 5. Diffing & Updates (Phase 2) ---
 
 function checkChanges() {
     const result = parseDOM();
-    const currentSnapshot = result.snapshot;
+    let currentSnapshot = result.snapshot;
+
+    // Append API Calls (V2.4)
+    if (apiCalls.length > 0) {
+        currentSnapshot += "\n\n<api_activity>\n";
+        apiCalls.forEach(api => {
+            currentSnapshot += `  <call method="${api.method}" url="${api.url}">\n    ${redactPII(api.body || '')}\n  </call>\n`;
+        });
+        currentSnapshot += "</api_activity>";
+    }
 
     if (currentSnapshot !== lastSnapshot) {
         lastSnapshot = currentSnapshot;
@@ -192,14 +223,11 @@ const observer = new MutationObserver(() => {
 });
 
 
-// --- 5. User Interrupt Detection (V2.2) ---
+// --- 6. User Interrupt Detection (V2.2) ---
 
 function handleUserInteraction() {
-    // Debounce interrupts to avoid flooding
     if (this._interruptTimer) return;
     this._interruptTimer = setTimeout(() => { this._interruptTimer = null; }, 1000);
-
-    console.log("[Target] User Interaction Detected. Sending Interrupt.");
     chrome.runtime.sendMessage({ action: "USER_INTERRUPT" });
 }
 
@@ -207,11 +235,12 @@ window.addEventListener('mousedown', handleUserInteraction, true);
 window.addEventListener('keydown', handleUserInteraction, true);
 
 
-// --- 6. Message Listener ---
+// --- 7. Message Listener ---
 
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     if (msg.action === "INIT_TARGET") {
         console.log("Target Initialized");
+        injectNetworkHook(); // Inject hook
         checkChanges();
         observer.observe(document.body, { subtree: true, childList: true, attributes: true, characterData: true });
     }
