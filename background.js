@@ -48,7 +48,9 @@ const DEFAULT_STATE = {
     isAgentBusy: false,
     busySince: 0,
     elementMap: {},
-    lastActionTimestamp: 0
+    lastActionTimestamp: 0,
+    observationMode: false,
+    sessionKeyword: null
 };
 
 // State Mutex
@@ -269,8 +271,13 @@ async function broadcastStatus(changes) {
     const state = await getState();
     let status = "Idle";
     let color = "red"; // Default to error/unknown
+    let allowInput = false;
 
-    if (state.agentTabId && state.targetTabs.length > 0) {
+    if (state.observationMode) {
+        status = "Waiting for Intro... (Manual Override Active)";
+        color = "yellow";
+        allowInput = true;
+    } else if (state.agentTabId && state.targetTabs.length > 0) {
         if (state.commandQueue.length > 0) {
             status = "Working";
             color = "green";
@@ -290,7 +297,8 @@ async function broadcastStatus(changes) {
         status: status,
         color: color,
         queueLength: state.commandQueue.length,
-        lastAction: state.lastActionTimestamp ? "Active" : "Waiting..."
+        lastAction: state.lastActionTimestamp ? "Active" : "Waiting...",
+        allowInput: allowInput
     };
 
     if (state.agentTabId) sendMessageToTab(state.agentTabId, { action: "DASHBOARD_UPDATE", payload });
@@ -322,8 +330,14 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
                     if (state.agentTabId === tid) return;
 
                     const targets = state.targetTabs.filter(t => t.tabId !== tid);
+
+                    // Generate unique session keyword
+                    const targetDomain = targets.length > 0 ? (new URL(targets[0].url).hostname) : "unknown";
+                    const agentDomain = sender.tab?.url ? (new URL(sender.tab.url).hostname) : "unknown";
+                    const sessionKeyword = `[END:${targetDomain}-${agentDomain}-${Date.now()}]`;
+
                     const taskDescription = msg.task ? `\n\nYOUR GOAL: ${msg.task}` : "";
-                    const initialPrompt = `You are an autonomous agent. I will feed you the state of another tab. Output commands like \`interact\` to interact.${taskDescription}`;
+                    const initialPrompt = `You are an autonomous agent. I will feed you the state of another tab. Output commands like \`interact\` to interact.${taskDescription}\n\nIMPORTANT: End EVERY response with this exact keyword: ${sessionKeyword}`;
 
                     await updateState({
                         agentTabId: tid,
@@ -331,10 +345,12 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
                         targetTabs: targets,
                         // commandQueue: [], // Preserve existing queue (e.g. Target Maps)
                         elementMap: {},
-                        lastActionTimestamp: 0
+                        lastActionTimestamp: 0,
+                        observationMode: true,
+                        sessionKeyword: sessionKeyword
                     });
 
-                    sendMessageToTab(tid, { action: "INIT_AGENT" });
+                    sendMessageToTab(tid, { action: "INIT_AGENT", keyword: sessionKeyword });
 
                     // Immediate execution of first prompt (Bypass Queue)
                     const safePayload = `<browsing_context>\n${initialPrompt}\n</browsing_context>`;
@@ -369,6 +385,23 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
             await enqueue({ type: 'CLICK_TARGET', payload: msg.payload });
         }
 
+        // Handle Intro Completion
+        if (msg.action === "INTRO_COMPLETE") {
+            log("[System] Intro Complete. Exiting Observation Mode.");
+            await withLock(async () => {
+                const s = await getState();
+                if (s.observationMode) {
+                    await updateState({ observationMode: false });
+                    // If we have items in the queue (e.g., target map), they will be processed naturally
+                    // by the next queue check or update trigger. Since we just finished intro,
+                    // we might want to force a queue check if queue > 0.
+                    if (s.commandQueue.length > 0) {
+                        processQueue(s.commandQueue);
+                    }
+                }
+            });
+        }
+
         // Handle User Interruption
         if (msg.action === "USER_INTERRUPT") {
             log("[System] User Interruption Detected. Ignoring.");
@@ -390,7 +423,9 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
                     targetTabs: [],
                     commandQueue: [],
                     elementMap: {},
-                    lastActionTimestamp: 0
+                    lastActionTimestamp: 0,
+                    observationMode: false,
+                    sessionKeyword: null
                 });
             });
         }

@@ -175,8 +175,13 @@ function updateDashboard(state) {
 
         // Blocking Logic
         if (state.status.includes('Linked') || state.status.includes('Waiting') || state.status === 'Working') {
-            blocker.style.display = 'block';
-            shouldBlock = true;
+            if (state.allowInput) {
+                blocker.style.display = 'none';
+                shouldBlock = false;
+            } else {
+                blocker.style.display = 'block';
+                shouldBlock = true;
+            }
         } else {
             blocker.style.display = 'none';
             shouldBlock = false;
