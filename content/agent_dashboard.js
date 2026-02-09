@@ -55,8 +55,21 @@ function ensureDashboard() {
 
 function updateDashboard(state) {
     const root = ensureDashboard();
+    const statusEl = root.querySelector('.status');
     const queueEl = root.querySelector('.queue');
     const actionEl = root.querySelector('.last-action');
+
+    if (state.status) {
+        statusEl.innerHTML = `<span class="dot"></span>Bridge: ${state.status}`;
+        const dot = root.querySelector('.dot');
+        if (state.status === 'Linked') {
+            dot.style.background = '#00ff00';
+        } else if (state.status.includes('Waiting')) {
+            dot.style.background = '#ffff00';
+        } else {
+            dot.style.background = '#ff0000';
+        }
+    }
 
     if (state.queueLength !== undefined) queueEl.innerText = `Queue: ${state.queueLength}`;
     if (state.lastAction) actionEl.innerText = state.lastAction;
