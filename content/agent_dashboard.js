@@ -94,12 +94,20 @@ function updateDashboard(state) {
         const dot = root.querySelector('.dot');
 
         let shouldBlock = false;
-        if (state.status === 'Linked' || state.status.includes('Waiting')) {
-            dot.style.background = (state.status === 'Linked') ? '#00ff00' : '#ffff00';
+
+        // Use explicitly provided color
+        if (state.color) {
+            if (state.color === 'green') dot.style.background = '#00ff00';
+            else if (state.color === 'yellow') dot.style.background = '#ffff00';
+            else dot.style.background = '#ff0000';
+        }
+
+        // Logic for blocking: If Linked or Waiting, block.
+        // Status might be "Working" (Green), "Linked (Waiting)" (Yellow), "Waiting for..." (Yellow)
+        if (state.status.includes('Linked') || state.status.includes('Waiting') || state.status === 'Working') {
             blocker.style.display = 'block';
             shouldBlock = true;
         } else {
-            dot.style.background = '#ff0000';
             blocker.style.display = 'none';
             shouldBlock = false;
         }

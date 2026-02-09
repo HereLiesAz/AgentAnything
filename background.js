@@ -42,6 +42,7 @@ chrome.storage.onChanged.addListener((changes, area) => {
 // --- 1. State Persistence ---
 const DEFAULT_STATE = {
     agentTabId: null,
+    agentUrl: null, // Store Agent URL for recovery
     targetTabs: [],
     commandQueue: [],
     isAgentBusy: false,
@@ -267,12 +268,27 @@ async function sendMessageToTab(tabId, message) {
 async function broadcastStatus(changes) {
     const state = await getState();
     let status = "Idle";
-    if (state.agentTabId && state.targetTabs.length > 0) status = "Linked";
-    else if (state.agentTabId) status = "Waiting for Target";
-    else if (state.targetTabs.length > 0) status = "Waiting for Agent";
+    let color = "red"; // Default to error/unknown
+
+    if (state.agentTabId && state.targetTabs.length > 0) {
+        if (state.commandQueue.length > 0) {
+            status = "Working";
+            color = "green";
+        } else {
+            status = "Linked (Waiting)";
+            color = "yellow";
+        }
+    } else if (state.agentTabId) {
+        status = "Waiting for Target";
+        color = "yellow";
+    } else if (state.targetTabs.length > 0) {
+        status = "Waiting for Agent";
+        color = "yellow";
+    }
 
     const payload = {
         status: status,
+        color: color,
         queueLength: state.commandQueue.length,
         lastAction: state.lastActionTimestamp ? "Active" : "Waiting..."
     };
@@ -311,6 +327,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
                     await updateState({
                         agentTabId: tid,
+                        agentUrl: sender.tab?.url || "", // Capture Agent URL
                         targetTabs: targets,
                         // commandQueue: [], // Preserve existing queue (e.g. Target Maps)
                         elementMap: {},
@@ -380,6 +397,42 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
     })();
     return true;
+});
+
+// Tab Recovery Logic
+chrome.tabs.onRemoved.addListener(async (tabId) => {
+    await withLock(async () => {
+        const state = await getState();
+
+        // Recover Agent
+        if (state.agentTabId === tabId && state.agentUrl) {
+            log("[System] Agent tab closed. Recovering...");
+            try {
+                const newTab = await chrome.tabs.create({ url: state.agentUrl, active: false });
+                await updateState({ agentTabId: newTab.id });
+                // We rely on content script sending HELLO or user re-assigning,
+                // but actually we should try to re-init if possible.
+                // However, without content script ready, sendMessage fails.
+                // Best we can do is update ID so if it reloads it might reconnect if we had persistent checks.
+                // But simplified: Just open it. User might need to re-assign if content script doesn't auto-handshake.
+            } catch (e) { console.error("Agent recovery failed:", e); }
+        }
+
+        // Recover Targets
+        const targetIndex = state.targetTabs.findIndex(t => t.tabId === tabId);
+        if (targetIndex !== -1) {
+            const target = state.targetTabs[targetIndex];
+            if (target.url) {
+                log(`[System] Target tab ${tabId} closed. Recovering...`);
+                try {
+                    const newTab = await chrome.tabs.create({ url: target.url, active: false });
+                    const newTargets = [...state.targetTabs];
+                    newTargets[targetIndex] = { ...target, tabId: newTab.id };
+                    await updateState({ targetTabs: newTargets });
+                } catch (e) { console.error("Target recovery failed:", e); }
+            }
+        }
+    });
 });
 
 async function enqueue(item) {
