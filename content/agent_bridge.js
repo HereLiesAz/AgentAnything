@@ -63,6 +63,21 @@ function setContentEditableValue(element, value) {
     }
 }
 
+// --- 3.3 Click Simulation ---
+function simulateClick(element) {
+    const options = { bubbles: true, cancelable: true, view: window };
+    let events = ['mousedown', 'mouseup', 'click'];
+
+    if (typeof window.PointerEvent === 'function') {
+        events = ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click'];
+    }
+
+    events.forEach(type => {
+        const Ctor = type.startsWith('pointer') ? PointerEvent : MouseEvent;
+        element.dispatchEvent(new Ctor(type, options));
+    });
+}
+
 
 // --- 3.4 Determining "Busy" State ---
 function isBusy() {
@@ -109,23 +124,37 @@ async function executePrompt(text) {
 
     // Polling for submission (Robust Strategy)
     const startTime = Date.now();
+    let lastRetryTime = 0;
+
     const interval = setInterval(() => {
+        const now = Date.now();
+        const elapsed = now - startTime;
         const btn = document.querySelector(config.submit) ||
                     document.querySelector('button[aria-label="Send message"]') ||
                     document.querySelector('button[data-testid="send-button"]');
 
         if (btn && !btn.disabled) {
             clearInterval(interval);
-            btn.click();
+            simulateClick(btn);
             console.log("[AgentAnything] Prompt submitted via button click");
-        } else if (Date.now() - startTime > 5000) {
-            clearInterval(interval);
-            // Fallback Enter
-            console.warn("[AgentAnything] Button not ready, forcing Enter key");
-            const eventOpts = { key: 'Enter', code: 'Enter', keyCode: 13, bubbles: true, cancelable: true, view: window, composed: true };
-            inputEl.dispatchEvent(new KeyboardEvent('keydown', eventOpts));
-            inputEl.dispatchEvent(new KeyboardEvent('keypress', eventOpts));
-            inputEl.dispatchEvent(new KeyboardEvent('keyup', eventOpts));
+        } else {
+            // Timeout or Retry Logic
+            if (elapsed > 5000) {
+                clearInterval(interval);
+                // Fallback Enter
+                console.warn("[AgentAnything] Button not ready, forcing Enter key");
+                const eventOpts = { key: 'Enter', code: 'Enter', keyCode: 13, bubbles: true, cancelable: true, view: window, composed: true };
+                inputEl.dispatchEvent(new KeyboardEvent('keydown', eventOpts));
+                inputEl.dispatchEvent(new KeyboardEvent('keypress', eventOpts));
+                inputEl.dispatchEvent(new KeyboardEvent('keyup', eventOpts));
+            } else if (btn && btn.disabled && (elapsed > 2000)) {
+                 // If button disabled for > 2s, retry input event to wake up UI
+                 if (now - lastRetryTime > 1000) { // Retry every > 1s
+                     lastRetryTime = now;
+                     console.log("[AgentAnything] Button disabled, re-dispatching input");
+                     inputEl.dispatchEvent(new Event('input', { bubbles: true }));
+                 }
+            }
         }
     }, 100);
 }
