@@ -79,7 +79,9 @@ function startKeepAlive() {
   createOffscreen();
   if (keepAliveInterval) clearInterval(keepAliveInterval);
   keepAliveInterval = setInterval(() => {
-    chrome.runtime.sendMessage({ target: 'offscreen', action: 'ping' });
+    if (chrome.runtime?.id) {
+        chrome.runtime.sendMessage({ target: 'offscreen', action: 'ping' }).catch(() => {});
+    }
     checkTimeout();
   }, 20000);
 }
