@@ -53,12 +53,10 @@ const DEFAULT_STATE = {
 // State Mutex
 let stateLock = Promise.resolve();
 async function withLock(fn) {
-    let release;
-    const acquire = new Promise(resolve => release = resolve);
     const currentLock = stateLock;
     stateLock = (async () => {
-        await currentLock;
-        try { await fn(); } finally { release(); }
+        try { await currentLock; } catch (e) { console.error("Lock recovery:", e); }
+        try { await fn(); } catch (e) { console.error("Lock task failed:", e); }
     })();
     return stateLock;
 }
