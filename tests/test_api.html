@@ -1,0 +1,11 @@
+<!DOCTYPE html>
+<html>
+<body>
+    <button id="apiBtn">Trigger API</button>
+    <script>
+        document.getElementById('apiBtn').onclick = () => {
+            fetch('/api/test', { method: 'POST', body: JSON.stringify({foo: 'bar'}) });
+        };
+    </script>
+</body>
+</html>
