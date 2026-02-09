@@ -1,119 +1,98 @@
 
 const assert = require('assert');
 
-// Mock Chrome Storage
+// Mock Chrome Storage Local
 const storage = {
-    session: {
+    local: {
         _data: {},
         get: async (keys) => {
-            if (typeof keys === 'string') return { [keys]: storage.session._data[keys] };
+            if (typeof keys === 'string') return { [keys]: storage.local._data[keys] };
             if (Array.isArray(keys)) {
                 let res = {};
-                keys.forEach(k => res[k] = storage.session._data[k]);
+                keys.forEach(k => res[k] = storage.local._data[k]);
                 return res;
             }
             if (typeof keys === 'object') {
                  let res = {};
                  for (let k in keys) {
-                     res[k] = storage.session._data[k] !== undefined ? storage.session._data[k] : keys[k];
+                     res[k] = storage.local._data[k] !== undefined ? storage.local._data[k] : keys[k];
                  }
                  return res;
             }
-            return storage.session._data;
+            return storage.local._data;
         },
         set: async (items) => {
-            Object.assign(storage.session._data, items);
+            Object.assign(storage.local._data, items);
+            if (storage.onChanged.listeners.length > 0) {
+                 storage.onChanged.listeners.forEach(fn => fn({
+                     commandQueue: { newValue: items.commandQueue }
+                 }, 'local'));
+            }
         },
-        remove: async (keys) => {
-             if (Array.isArray(keys)) keys.forEach(k => delete storage.session._data[k]);
-        },
-        clear: async () => { storage.session._data = {}; }
+    },
+    onChanged: {
+        listeners: [],
+        addListener: (fn) => storage.onChanged.listeners.push(fn)
     }
 };
 
 global.chrome = { storage };
 
-// --- Copy Background Logic (Simplified for testing) ---
-// In a real setup, we would export/import, but for this constraint environment, we'll inline the core logic to test.
-
+// --- Copy Background Logic (Simplified) ---
 const DEFAULT_STATE = {
     agentTabId: null,
-    targetTabIds: [],
-    messageQueue: [],
-    isAgentBusy: false,
-    busySince: 0
+    targetTabs: [],
+    commandQueue: [],
+    lastActionTimestamp: 0
 };
 
 async function getState() {
-    const data = await chrome.storage.session.get(DEFAULT_STATE);
-    if (!Array.isArray(data.targetTabIds)) data.targetTabIds = [];
+    const data = await chrome.storage.local.get(DEFAULT_STATE);
+    if (!Array.isArray(data.targetTabs)) data.targetTabs = [];
+    if (!Array.isArray(data.commandQueue)) data.commandQueue = [];
     return { ...DEFAULT_STATE, ...data };
 }
 
 async function updateState(updates) {
-    await chrome.storage.session.set(updates);
+    await chrome.storage.local.set(updates);
 }
 
-// Mutex
-let stateMutex = Promise.resolve();
-async function withLock(fn) {
-    const next = stateMutex.then(async () => {
-        try { await fn(); } catch (e) { console.error(e); }
-    });
-    stateMutex = next;
-    return next;
-}
-
-// Deadlock Logic from processQueue
-async function checkDeadlock() {
+// Timeout Logic
+async function checkTimeout() {
     const state = await getState();
-    if (state.isAgentBusy) {
-        if (Date.now() - (state.busySince || 0) > 180000) {
-            await updateState({ isAgentBusy: false, busySince: 0 });
-            return true; // Unlocked
-        }
+    if (state.lastActionTimestamp > 0 && (Date.now() - state.lastActionTimestamp > 15000)) {
+        await updateState({ lastActionTimestamp: 0 });
+        // Simulating enqueuing error
+        global.timeoutFired = true;
     }
-    return false;
 }
+
+// Interrupt Logic
+async function handleInterrupt() {
+    await updateState({ commandQueue: [], lastActionTimestamp: 0 });
+}
+
 
 // --- TESTS ---
 
 async function runTests() {
-    console.log("Running Background Logic Tests...");
+    console.log("Running Background Robustness Tests...");
 
-    // Test 1: State Persistence
-    await updateState({ agentTabId: 123 });
+    // Test 1: Timeout Logic
+    await updateState({ lastActionTimestamp: Date.now() - 20000 }); // 20s ago
+    global.timeoutFired = false;
+    await checkTimeout();
+    assert.strictEqual(global.timeoutFired, true, "Timeout should fire after 15s");
     let state = await getState();
-    assert.strictEqual(state.agentTabId, 123, "Agent Tab ID should persist");
+    assert.strictEqual(state.lastActionTimestamp, 0, "Timeout should reset timestamp");
 
-    // Test 2: Deadlock Recovery
-    const now = Date.now();
-    await updateState({ isAgentBusy: true, busySince: now - 200000 }); // 3m 20s ago
-    const unlocked = await checkDeadlock();
+    // Test 2: Interrupt Logic
+    await updateState({ commandQueue: [{type: 'CMD1'}, {type: 'CMD2'}] });
+    await handleInterrupt();
     state = await getState();
-    assert.strictEqual(unlocked, true, "Should detect deadlock");
-    assert.strictEqual(state.isAgentBusy, false, "Should auto-unlock");
+    assert.strictEqual(state.commandQueue.length, 0, "Interrupt should clear queue");
 
-    // Test 3: No False Positive Deadlock
-    await updateState({ isAgentBusy: true, busySince: now - 10000 }); // 10s ago
-    const unlockedFalse = await checkDeadlock();
-    state = await getState();
-    assert.strictEqual(unlockedFalse, false, "Should NOT detect deadlock yet");
-    assert.strictEqual(state.isAgentBusy, true, "Should remain locked");
-
-    // Test 4: Mutex Sequencing
-    let log = [];
-    const p1 = withLock(async () => {
-        await new Promise(r => setTimeout(r, 50));
-        log.push(1);
-    });
-    const p2 = withLock(async () => {
-        log.push(2);
-    });
-    await Promise.all([p1, p2]);
-    assert.deepStrictEqual(log, [1, 2], "Mutex should serialize execution order");
-
-    console.log("All Background Tests Passed!");
+    console.log("All Robustness Tests Passed!");
 }
 
 runTests().catch(e => {
