@@ -126,25 +126,16 @@ async function executePrompt(text) {
 
         if (btn && !btn.disabled) {
             clearInterval(interval);
-            simulateClick(btn);
+            btn.click();
             console.log("[AgentAnything] Prompt submitted via button click");
-        } else {
-            // Timeout or Retry Logic
-            if (Date.now() - startTime > 5000) {
-                clearInterval(interval);
-                // Fallback Enter
-                console.warn("[AgentAnything] Button not ready, forcing Enter key");
-                const eventOpts = { key: 'Enter', code: 'Enter', keyCode: 13, bubbles: true, cancelable: true, view: window, composed: true };
-                inputEl.dispatchEvent(new KeyboardEvent('keydown', eventOpts));
-                inputEl.dispatchEvent(new KeyboardEvent('keypress', eventOpts));
-                inputEl.dispatchEvent(new KeyboardEvent('keyup', eventOpts));
-            } else if (btn && btn.disabled && (Date.now() - startTime > 2000)) {
-                 // If button disabled for > 2s, retry input event to wake up UI
-                 if ((Date.now() - startTime) % 1000 < 100) { // Retry every ~1s
-                     console.log("[AgentAnything] Button disabled, re-dispatching input");
-                     inputEl.dispatchEvent(new Event('input', { bubbles: true }));
-                 }
-            }
+        } else if (Date.now() - startTime > 5000) {
+            clearInterval(interval);
+            // Fallback Enter
+            console.warn("[AgentAnything] Button not ready, forcing Enter key");
+            const eventOpts = { key: 'Enter', code: 'Enter', keyCode: 13, bubbles: true, cancelable: true, view: window, composed: true };
+            inputEl.dispatchEvent(new KeyboardEvent('keydown', eventOpts));
+            inputEl.dispatchEvent(new KeyboardEvent('keypress', eventOpts));
+            inputEl.dispatchEvent(new KeyboardEvent('keyup', eventOpts));
         }
     }, 100);
 }
