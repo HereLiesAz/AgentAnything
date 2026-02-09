@@ -104,26 +104,31 @@ async function executePrompt(text) {
         setContentEditableValue(inputEl, text);
     }
 
-    // Wait slightly for validation then click submit
-    setTimeout(() => {
+    // Polling for submission (Robust Strategy)
+    const startTime = Date.now();
+    const interval = setInterval(() => {
         const btn = document.querySelector(config.submit) ||
                     document.querySelector('button[aria-label="Send message"]') ||
                     document.querySelector('button[data-testid="send-button"]');
 
         if (btn && !btn.disabled) {
+            clearInterval(interval);
             btn.click();
-        } else {
+            console.log("[AgentAnything] Prompt submitted via button click");
+        } else if (Date.now() - startTime > 2000) {
+            clearInterval(interval);
             // Fallback Enter
+            console.warn("[AgentAnything] Button not ready, forcing Enter key");
             inputEl.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, bubbles: true }));
         }
-    }, 300);
+    }, 100);
 }
 
 
 // --- 3.3 The Input Queue & Debouncer ---
 
 let updateBuffer = [];
-let debounceTimer = null;
+let agentDebounceTimer = null;
 
 function bufferUpdate(text) {
     updateBuffer.push(text);
@@ -131,14 +136,14 @@ function bufferUpdate(text) {
 }
 
 function scheduleInjection() {
-    if (debounceTimer) clearTimeout(debounceTimer);
+    if (agentDebounceTimer) clearTimeout(agentDebounceTimer);
 
     if (isBusy()) {
-        debounceTimer = setTimeout(scheduleInjection, 1000);
+        agentDebounceTimer = setTimeout(scheduleInjection, 1000);
         return;
     }
 
-    debounceTimer = setTimeout(() => {
+    agentDebounceTimer = setTimeout(() => {
         if (updateBuffer.length === 0) return;
 
         const combinedText = updateBuffer.join("\n\n");
@@ -196,7 +201,9 @@ function parseCommands(text) {
             try {
                 const json = JSON.parse(raw);
                 console.log("Found command:", json);
-                chrome.runtime.sendMessage({ action: "AGENT_COMMAND", payload: json });
+                if (chrome.runtime?.id) {
+                    chrome.runtime.sendMessage({ action: "AGENT_COMMAND", payload: json }).catch(() => {});
+                }
                 sentCommands.add(raw);
             } catch (e) {
                 console.error("Failed to parse command:", e);
@@ -213,7 +220,9 @@ function parseCommands(text) {
                 const json = JSON.parse(raw);
                 if (json.tool) {
                     console.log("Found legacy command:", json);
-                    chrome.runtime.sendMessage({ action: "AGENT_COMMAND", payload: json });
+                    if (chrome.runtime?.id) {
+                        chrome.runtime.sendMessage({ action: "AGENT_COMMAND", payload: json }).catch(() => {});
+                    }
                     sentCommands.add(raw);
                 }
             } catch (e) {
