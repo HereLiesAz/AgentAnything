@@ -308,7 +308,8 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
                     if (state.agentTabId === tid) return;
 
                     const targets = state.targetTabs.filter(t => t.tabId !== tid);
-                    const initialPrompt = "You are an autonomous agent. I will feed you the state of another tab. Output commands like `interact` to interact.";
+                    const taskDescription = msg.task ? `\n\nYOUR GOAL: ${msg.task}` : "";
+                    const initialPrompt = `You are an autonomous agent. I will feed you the state of another tab. Output commands like \`interact\` to interact.${taskDescription}`;
 
                     await updateState({
                         agentTabId: tid,

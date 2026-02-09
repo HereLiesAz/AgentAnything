@@ -39,7 +39,8 @@ document.addEventListener('DOMContentLoaded', async () => {
     // 2. ASSIGN AGENT
     btnAgent.onclick = async () => {
         const tabs = await chrome.tabs.query({active: true, currentWindow: true});
-        chrome.runtime.sendMessage({ action: "ASSIGN_ROLE", role: "AGENT", tabId: tabs[0].id });
+        const task = document.getElementById('task-input').value.trim();
+        chrome.runtime.sendMessage({ action: "ASSIGN_ROLE", role: "AGENT", tabId: tabs[0].id, task: task });
         window.close();
     };
 

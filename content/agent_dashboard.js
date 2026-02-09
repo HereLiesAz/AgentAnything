@@ -41,9 +41,9 @@ function ensureDashboard() {
             .blocker {
                 position: fixed;
                 top: 0; left: 0; width: 100vw; height: 100vh;
-                background: rgba(0,0,0,0.1);
+                background: rgba(0,0,0,0.05);
                 z-index: 2147483646; /* Just below overlay */
-                cursor: not-allowed;
+                pointer-events: none; /* Allows scrolling */
                 display: none;
             }
         `;
@@ -65,6 +65,23 @@ function ensureDashboard() {
     return host._shadowRoot;
 }
 
+// Interaction Blocking
+function blockInteractions(enable) {
+    const events = ['click', 'mousedown', 'mouseup', 'keydown', 'keypress', 'keyup', 'submit', 'focus'];
+    const handler = (e) => {
+        e.stopPropagation();
+        e.preventDefault();
+    };
+
+    if (enable) {
+        events.forEach(ev => window.addEventListener(ev, handler, true));
+    } else {
+        events.forEach(ev => window.removeEventListener(ev, handler, true));
+    }
+}
+
+let isBlocked = false;
+
 function updateDashboard(state) {
     const root = ensureDashboard();
     const statusEl = root.querySelector('.status');
@@ -76,19 +93,25 @@ function updateDashboard(state) {
         statusEl.innerHTML = `<span class="dot"></span>Bridge: ${state.status}`;
         const dot = root.querySelector('.dot');
 
-        if (state.status === 'Linked') {
-            dot.style.background = '#00ff00';
+        let shouldBlock = false;
+        if (state.status === 'Linked' || state.status.includes('Waiting')) {
+            dot.style.background = (state.status === 'Linked') ? '#00ff00' : '#ffff00';
             blocker.style.display = 'block';
-        } else if (state.status.includes('Waiting')) {
-            dot.style.background = '#ffff00';
-            blocker.style.display = 'block';
+            shouldBlock = true;
         } else {
             dot.style.background = '#ff0000';
-            blocker.style.display = 'none'; // Allow user to fix issues
+            blocker.style.display = 'none';
+            shouldBlock = false;
         }
 
         if (state.status === 'Idle') {
              blocker.style.display = 'none';
+             shouldBlock = false;
+        }
+
+        if (shouldBlock !== isBlocked) {
+            isBlocked = shouldBlock;
+            blockInteractions(isBlocked);
         }
     }
 
