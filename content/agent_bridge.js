@@ -36,6 +36,30 @@ function getProvider() {
 const PROVIDER = getProvider();
 console.log(`[AgentAnything] Bridge Active for: ${PROVIDER}`);
 
+// --- 2.1 Observation Mode State ---
+let observationMode = false;
+let sessionKeyword = null;
+let learnedSelectors = { input: null, submit: null };
+let potentialSelectors = { input: null, submit: null };
+
+// Capture candidates
+window.addEventListener('click', (e) => {
+    if (observationMode) potentialSelectors.submit = e.target;
+}, true);
+
+window.addEventListener('focus', (e) => {
+    if (observationMode) {
+        const t = e.target;
+        if (t.isContentEditable || t.tagName === 'INPUT' || t.tagName === 'TEXTAREA') {
+            potentialSelectors.input = t;
+        }
+    }
+}, true);
+window.addEventListener('input', (e) => {
+    if (observationMode) potentialSelectors.input = e.target;
+}, true);
+
+
 // --- 3. React Injection Logic (Phase 1) ---
 function setReactValue(element, value) {
     element.focus();
@@ -66,14 +90,13 @@ function setContentEditableValue(element, value) {
 // --- 3.3 Click Simulation ---
 function simulateClick(element) {
     const options = { bubbles: true, cancelable: true, view: window };
-    let events = ['mousedown', 'mouseup', 'click'];
-
-    if (typeof window.PointerEvent === 'function') {
-        events = ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click'];
-    }
+    const hasPointer = typeof PointerEvent !== 'undefined';
+    const events = hasPointer ?
+        ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click'] :
+        ['mousedown', 'mouseup', 'click'];
 
     events.forEach(type => {
-        const Ctor = type.startsWith('pointer') ? PointerEvent : MouseEvent;
+        const Ctor = hasPointer && type.startsWith('pointer') ? PointerEvent : MouseEvent;
         element.dispatchEvent(new Ctor(type, options));
     });
 }
@@ -91,6 +114,17 @@ function isBusy() {
 
 // --- 4. Message Listener (Phase 1) ---
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
+    if (request.action === "INIT_AGENT") {
+        if (request.keyword) {
+            sessionKeyword = request.keyword;
+            observationMode = true;
+            // Reset learned selectors for new session
+            learnedSelectors = { input: null, submit: null };
+            potentialSelectors = { input: null, submit: null };
+            console.log(`[AgentAnything] Observation Mode Active. Keyword: ${sessionKeyword}`);
+        }
+    }
+
     // Direct Execution
     if (request.action === "EXECUTE_PROMPT") {
         executePrompt(request.text);
@@ -110,7 +144,12 @@ async function executePrompt(text) {
     const config = SELECTORS[PROVIDER];
     if (!config) return;
 
-    let inputEl = document.querySelector(config.input);
+    // Attempt Copy if in Observation Mode
+    if (observationMode) {
+        navigator.clipboard.writeText(text).catch(e => console.warn("Clipboard write failed", e));
+    }
+
+    let inputEl = learnedSelectors.input || document.querySelector(config.input);
     if (!inputEl) {
         console.error("Input not found");
         return;
@@ -124,14 +163,18 @@ async function executePrompt(text) {
 
     // Polling for submission (Robust Strategy)
     const startTime = Date.now();
-    let lastRetryTime = 0;
+    let lastRetryTimestamp = 0;
 
     const interval = setInterval(() => {
         const now = Date.now();
         const elapsed = now - startTime;
-        const btn = document.querySelector(config.submit) ||
-                    document.querySelector('button[aria-label="Send message"]') ||
-                    document.querySelector('button[data-testid="send-button"]');
+
+        let btn = learnedSelectors.submit;
+        if (!btn) {
+            btn = document.querySelector(config.submit) ||
+                  document.querySelector('button[aria-label="Send message"]') ||
+                  document.querySelector('button[data-testid="send-button"]');
+        }
 
         if (btn && !btn.disabled) {
             clearInterval(interval);
@@ -149,8 +192,8 @@ async function executePrompt(text) {
                 inputEl.dispatchEvent(new KeyboardEvent('keyup', eventOpts));
             } else if (btn && btn.disabled && (elapsed > 2000)) {
                  // If button disabled for > 2s, retry input event to wake up UI
-                 if (now - lastRetryTime > 1000) { // Retry every > 1s
-                     lastRetryTime = now;
+                 if (now - lastRetryTimestamp > 1000) { // Retry every > 1s
+                     lastRetryTimestamp = now;
                      console.log("[AgentAnything] Button disabled, re-dispatching input");
                      inputEl.dispatchEvent(new Event('input', { bubbles: true }));
                  }
@@ -218,6 +261,21 @@ function startMonitoring() {
             const text = lastMsgEl.innerText;
             if (text !== lastMessageText) {
                 lastMessageText = text;
+
+                // Check for Session Keyword (Observation Mode)
+                if (observationMode && sessionKeyword && text.includes(sessionKeyword)) {
+                    console.log("[AgentAnything] Session Keyword Detected!");
+                    observationMode = false;
+
+                    // Commit learned selectors
+                    if (potentialSelectors.submit) learnedSelectors.submit = potentialSelectors.submit;
+                    if (potentialSelectors.input) learnedSelectors.input = potentialSelectors.input;
+
+                    if (chrome.runtime?.id) {
+                         chrome.runtime.sendMessage({ action: "INTRO_COMPLETE" }).catch(() => {});
+                    }
+                }
+
                 parseCommands(text);
             }
         }
