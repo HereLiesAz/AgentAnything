@@ -332,8 +332,11 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
                     const targets = state.targetTabs.filter(t => t.tabId !== tid);
 
                     // Generate unique session keyword
-                    const targetDomain = targets.length > 0 ? (new URL(targets[0].url).hostname) : "unknown";
-                    const agentDomain = sender.tab?.url ? (new URL(sender.tab.url).hostname) : "unknown";
+                    const safeGetHostname = (u) => {
+                        try { return new URL(u).hostname; } catch (e) { return "unknown"; }
+                    };
+                    const targetDomain = targets.length > 0 ? safeGetHostname(targets[0].url) : "unknown";
+                    const agentDomain = sender.tab?.url ? safeGetHostname(sender.tab.url) : "unknown";
                     const sessionKeyword = `[END:${targetDomain}-${agentDomain}-${Date.now()}]`;
 
                     const taskDescription = msg.task ? `\n\nYOUR GOAL: ${msg.task}` : "";
