@@ -1,28 +1,46 @@
 {
-  "manifest_version": 3,
   "name": "AgentAnything",
-  "version": "1.0",
-  "description": "AI network inspection via Chrome DevTools Protocol",
+  "description": "Multi-tab AI orchestration and automation layer.",
+  "version": "1.0.0",
+  "manifest_version": 3,
+
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+
   "permissions": [
-    "debugger",
-    "tabs",
     "storage",
-    "activeTab"
+    "tabs",
+    "scripting",
+    "activeTab",
+    "debugger"
   ],
+
   "host_permissions": [
     "<all_urls>"
   ],
-  "background": {
-    "service_worker": "background.js"
-  },
-  "action": {
-    "default_popup": "popup.html"
-  },
+
   "content_scripts": [
     {
       "matches": ["<all_urls>"],
-      "js": ["content/agent_bridge.js", "content/agent_dashboard.js"],
+      "js": [
+        "content/agent_bridge.js",
+        "content/target_adapter.js",
+        "content/agent_dashboard.js"
+      ],
       "run_at": "document_idle"
     }
-  ]
+  ],
+
+  "web_accessible_resources": [
+    {
+      "resources": ["content/network_hook.js"],
+      "matches": ["<all_urls>"]
+    }
+  ],
+
+  "action": {
+    "default_title": "AgentAnything"
+  }
 }
