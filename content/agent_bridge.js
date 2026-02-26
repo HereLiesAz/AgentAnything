@@ -4,23 +4,31 @@
 console.log("[AgentAnything] Agent Bridge V2.1 Loaded");
 
 // --- 1. Selector Config ---
+// IMPORTANT — stop selectors must ONLY match elements that are present while the AI is
+// actively generating. Do NOT use broad selectors that also match static UI chrome
+// (copy buttons, thumbs-up icons, etc.) — those will cause isBusy() to always return true,
+// which permanently blocks the injection debounce loop.
 const SELECTORS = {
     chatgpt: {
         input: '#prompt-textarea',
         submit: 'button[data-testid="send-button"]',
-        stop: 'button[aria-label="Stop generating"], button[data-testid="stop-button"]',
+        // The stop button only appears while generating
+        stop: 'button[data-testid="stop-button"]',
         lastMessage: 'div[data-message-author-role="assistant"]:last-of-type'
     },
     claude: {
         input: '.ProseMirror[contenteditable="true"], div[contenteditable="true"][data-placeholder]',
         submit: 'button[aria-label="Send Message"], button[data-testid="send-button"]',
-        stop: 'button[aria-label="Stop Response"], .font-claude-message ~ div button[aria-label]',
-        lastMessage: '.font-claude-message:last-of-type, [data-is-streaming] ~ * .font-claude-message:last-of-type'
+        // [data-is-streaming] is the attribute Claude sets on the response container while generating.
+        // This is much more specific than any button selector.
+        stop: '[data-is-streaming="true"]',
+        lastMessage: '.font-claude-message:last-of-type'
     },
     gemini: {
         input: '.ql-editor, div[contenteditable="true"]',
         submit: '.send-button, button[aria-label="Send message"]',
-        stop: '.run-spinner, [aria-label="Stop response"]',
+        // .run-spinner only appears while Gemini is generating
+        stop: '.run-spinner',
         lastMessage: 'message-content:last-of-type, .response-container:last-of-type'
     }
 };
@@ -136,16 +144,15 @@ function simulateClick(element) {
 
 
 // --- 3.4 Determining "Busy" State ---
-// FIX: Previous code had ChatGPT-specific .result-streaming as a fallback on all providers.
-//      Now checks provider-specific selectors properly.
+// Returns true only while the AI is actively generating a response.
+// MUST be conservative — a false positive here will permanently stall the injection loop.
 function isBusy() {
     const config = SELECTORS[PROVIDER];
-    if (!config) return false;
-    if (config.stop && document.querySelector(config.stop)) return true;
-    // Aria-based fallback: look for any "Stop" button that's visible
-    const stopBtn = document.querySelector('button[aria-label*="Stop"], button[aria-label*="stop"]');
-    if (stopBtn && stopBtn.offsetParent !== null) return true;
-    return false;
+    if (!config || !config.stop) return false;
+    const stopEl = document.querySelector(config.stop);
+    if (!stopEl) return false;
+    // Ensure the element is actually visible, not just present in the DOM
+    return stopEl.offsetParent !== null || stopEl.offsetWidth > 0 || stopEl.offsetHeight > 0;
 }
 
 
@@ -215,6 +222,9 @@ async function executePrompt(text) {
             clearInterval(interval);
             simulateClick(btn);
             console.log("[AgentAnything] Prompt submitted via button click");
+            // Safety net: poll for commands after submission in case the streaming
+            // indicator is too brief for the MutationObserver to catch the idle edge.
+            schedulePostSubmitScan();
         } else {
             if (elapsed > 5000) {
                 clearInterval(interval);
@@ -223,6 +233,7 @@ async function executePrompt(text) {
                 inputEl.dispatchEvent(new KeyboardEvent('keydown', eventOpts));
                 inputEl.dispatchEvent(new KeyboardEvent('keypress', eventOpts));
                 inputEl.dispatchEvent(new KeyboardEvent('keyup', eventOpts));
+                schedulePostSubmitScan();
             } else if (btn && btn.disabled && (elapsed > 2000)) {
                  if (now - lastRetryTimestamp > 1000) {
                      lastRetryTimestamp = now;
@@ -232,6 +243,58 @@ async function executePrompt(text) {
             }
         }
     }, 100);
+}
+
+// Poll for a completed response after prompt submission.
+// Checks every second for up to 90 seconds, stopping as soon as the AI becomes idle
+// and new text appears. This is a fallback for when the streaming indicator is
+// too brief or absent, so the MutationObserver's idle-edge detection misses it.
+function schedulePostSubmitScan() {
+    const maxAttempts = 90;
+    let attempts = 0;
+    let lastSeen = lastMessageText;
+
+    const poll = setInterval(() => {
+        attempts++;
+        if (attempts > maxAttempts) {
+            clearInterval(poll);
+            return;
+        }
+
+        // Stop polling once the observer has already caught a change
+        if (lastMessageText !== lastSeen) {
+            clearInterval(poll);
+            return;
+        }
+
+        // If idle, scan now
+        if (!isBusy()) {
+            const config = SELECTORS[PROVIDER];
+            if (!config) { clearInterval(poll); return; }
+            const lastMsgEl = document.querySelector(config.lastMessage);
+            if (lastMsgEl) {
+                const text = lastMsgEl.innerText;
+                if (text && text !== lastSeen) {
+                    clearInterval(poll);
+                    lastMessageText = text;
+                    lastSeen = text;
+                    console.log("[AgentAnything] Post-submit scan found new response.");
+
+                    if (observationMode && sessionKeyword && text.includes(sessionKeyword)) {
+                        console.log("[AgentAnything] Session Keyword Detected (post-submit scan)!");
+                        observationMode = false;
+                        if (potentialSelectors.submit) learnedSelectors.submit = potentialSelectors.submit;
+                        if (potentialSelectors.input) learnedSelectors.input = potentialSelectors.input;
+                        if (chrome.runtime?.id) {
+                            chrome.runtime.sendMessage({ action: "INTRO_COMPLETE" }).catch(() => {});
+                        }
+                    }
+
+                    parseCommands(text);
+                }
+            }
+        }
+    }, 1000);
 }
 
 
@@ -271,45 +334,63 @@ const sentCommands = new Set();
 let lastMessageText = "";
 
 function startMonitoring() {
-    let lastState = false;
+    // Track whether the AI was busy on the previous mutation tick.
+    // We only parse commands on the falling edge: busy → idle.
+    // Parsing mid-stream risks catching truncated command JSON.
+    let wasBusy = false;
 
     const observer = new MutationObserver(() => {
         const busy = isBusy();
-        if (busy !== lastState) {
-            lastState = busy;
-            if (!busy) {
-                console.log("[AgentAnything] Agent became idle.");
-            }
+
+        // Falling edge: AI just finished generating
+        if (wasBusy && !busy) {
+            console.log("[AgentAnything] Agent became idle — scanning for commands.");
+            checkForKeywordAndCommands();
+        }
+        // Also check on rising edge in case a response arrives without a busy state
+        // (e.g. very fast completions that never trigger the stop indicator)
+        else if (!wasBusy && !busy) {
+            checkForKeywordAndCommands();
         }
 
-        const config = SELECTORS[PROVIDER];
-        if (!config || !config.lastMessage) return;
-
-        const lastMsgEl = document.querySelector(config.lastMessage);
-
-        if (lastMsgEl) {
-            const text = lastMsgEl.innerText;
-            if (text !== lastMessageText) {
-                lastMessageText = text;
-
-                if (observationMode && sessionKeyword && text.includes(sessionKeyword)) {
-                    console.log("[AgentAnything] Session Keyword Detected!");
-                    observationMode = false;
-
-                    if (potentialSelectors.submit) learnedSelectors.submit = potentialSelectors.submit;
-                    if (potentialSelectors.input) learnedSelectors.input = potentialSelectors.input;
-
-                    if (chrome.runtime?.id) {
-                         chrome.runtime.sendMessage({ action: "INTRO_COMPLETE" }).catch(() => {});
-                    }
-                }
-
-                parseCommands(text);
-            }
-        }
+        wasBusy = busy;
     });
 
-    observer.observe(document.body, { subtree: true, childList: true, attributes: true, attributeFilter: ['class', 'disabled', 'aria-label'] });
+    observer.observe(document.body, {
+        subtree: true,
+        childList: true,
+        attributes: true,
+        attributeFilter: ['class', 'disabled', 'aria-label', 'data-is-streaming']
+    });
+}
+
+function checkForKeywordAndCommands() {
+    const config = SELECTORS[PROVIDER];
+    if (!config || !config.lastMessage) return;
+
+    const lastMsgEl = document.querySelector(config.lastMessage);
+    if (!lastMsgEl) return;
+
+    const text = lastMsgEl.innerText;
+
+    // Only process if the text has actually changed since last check
+    if (text === lastMessageText) return;
+    lastMessageText = text;
+
+    // Check for session keyword (end of Observation Mode)
+    if (observationMode && sessionKeyword && text.includes(sessionKeyword)) {
+        console.log("[AgentAnything] Session Keyword Detected!");
+        observationMode = false;
+
+        if (potentialSelectors.submit) learnedSelectors.submit = potentialSelectors.submit;
+        if (potentialSelectors.input) learnedSelectors.input = potentialSelectors.input;
+
+        if (chrome.runtime?.id) {
+            chrome.runtime.sendMessage({ action: "INTRO_COMPLETE" }).catch(() => {});
+        }
+    }
+
+    parseCommands(text);
 }
 
 function parseCommands(text) {
