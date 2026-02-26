@@ -1,6 +1,10 @@
 (function() {
-// Agent Dashboard - Visual Feedback Panel (V2.1 - Non-Obtrusive)
-console.log("[AgentAnything] Agent Dashboard Loaded");
+// Agent Dashboard - Visual Feedback Panel (V2.2)
+// FIXES:
+//   - blockInteractions handler leak (removeEventListener requires same reference)
+//   - Agent tab no longer has its interactions blocked (only target tabs are blocked)
+//   - Blocker div removed in favor of JS-only blocking (avoids z-index cursor issues)
+console.log("[AgentAnything] Agent Dashboard V2.2 Loaded");
 
 function ensureDashboard() {
     let host = document.getElementById('agent-dashboard');
@@ -10,8 +14,7 @@ function ensureDashboard() {
         host.style.position = 'fixed';
         host.style.bottom = '10px';
         host.style.right = '10px';
-        host.style.zIndex = '999999';
-        // Ensure host itself doesn't block clicks outside the panel
+        host.style.zIndex = '2147483646';
         host.style.pointerEvents = 'none';
         document.body.appendChild(host);
 
@@ -21,7 +24,7 @@ function ensureDashboard() {
         const style = document.createElement('style');
         style.textContent = `
             .panel {
-                background: rgba(30, 30, 30, 0.9); /* Slightly transparent */
+                background: rgba(30, 30, 30, 0.92);
                 color: #fff;
                 font-family: monospace;
                 padding: 10px;
@@ -30,8 +33,9 @@ function ensureDashboard() {
                 width: 220px;
                 font-size: 12px;
                 box-shadow: 0 4px 6px rgba(0,0,0,0.3);
-                pointer-events: auto; /* Re-enable clicks for the panel */
+                pointer-events: auto;
                 transition: height 0.3s ease;
+                cursor: default;
             }
             .header {
                 display: flex;
@@ -57,7 +61,6 @@ function ensureDashboard() {
                 line-height: 1;
             }
             .btn-min:hover { background: #444; }
-
             .status { margin-bottom: 5px; display: flex; align-items: center; }
             .dot {
                 display: inline-block;
@@ -66,6 +69,7 @@ function ensureDashboard() {
                 border-radius: 50%;
                 background: #00ff00;
                 margin-right: 8px;
+                flex-shrink: 0;
             }
             .queue { color: #888; margin-bottom: 3px; }
             .last-action {
@@ -75,26 +79,19 @@ function ensureDashboard() {
                 text-overflow: ellipsis;
                 max-width: 200px;
             }
-
-            .blocker {
-                position: fixed;
-                top: 0; left: 0; width: 100vw; height: 100vh;
-                background: transparent; /* FIX: Fully transparent to avoid obstruction */
-                z-index: 2147483646; /* Just below overlay */
-                pointer-events: auto; /* Capture clicks */
+            .blocked-banner {
+                background: rgba(191, 97, 106, 0.2);
+                border: 1px solid #bf616a;
+                border-radius: 4px;
+                color: #ff9a9a;
+                font-size: 10px;
+                padding: 4px 6px;
+                margin-top: 5px;
                 display: none;
-                cursor: not-allowed;
             }
         `;
         shadow.appendChild(style);
 
-        // Blocker (Full Screen, Transparent)
-        const blocker = document.createElement('div');
-        blocker.className = 'blocker';
-        blocker.title = "Agent is working... (Interactions Blocked)";
-        shadow.appendChild(blocker);
-
-        // Panel
         const panel = document.createElement('div');
         panel.className = 'panel';
         panel.innerHTML = `
@@ -103,19 +100,19 @@ function ensureDashboard() {
                 <button class="btn-min" id="minimize-btn" title="Toggle Dashboard">-</button>
             </div>
             <div id="panel-content">
-                <div class="status"><span class="dot"></span>Connected</div>
+                <div class="status"><span class="dot"></span><span class="status-text">Connected</span></div>
                 <div class="queue">Queue: 0</div>
                 <div class="last-action">Waiting...</div>
+                <div class="blocked-banner" id="blocked-banner">⛔ Agent working — interactions paused</div>
             </div>
         `;
         shadow.appendChild(panel);
 
-        // Minimize Logic
         const btn = panel.querySelector('#minimize-btn');
         const content = panel.querySelector('#panel-content');
 
         btn.onclick = (e) => {
-            e.stopPropagation(); // Prevent propagation
+            e.stopPropagation();
             if (content.style.display === 'none') {
                 content.style.display = 'block';
                 btn.innerText = '-';
@@ -128,82 +125,75 @@ function ensureDashboard() {
     return host._shadowRoot;
 }
 
-// Interaction Blocking
+// FIX: Store the handler reference so removeEventListener can find the same function object.
+// Previous code created a new closure on each call, so removeEventListener never matched.
+let blockHandler = null;
+let isBlocked = false;
+
 function blockInteractions(enable) {
-    // We use the capture phase to stop immediate propagation
-    const events = ['click', 'mousedown', 'mouseup', 'keydown', 'keypress', 'keyup', 'submit', 'focus'];
-    const handler = (e) => {
-        // Allow interaction with our dashboard
-        if (e.target.closest && e.target.closest('#agent-dashboard')) return;
-
-        e.stopPropagation();
-        e.preventDefault();
-    };
-
-    if (enable) {
-        events.forEach(ev => window.addEventListener(ev, handler, true));
-    } else {
-        events.forEach(ev => window.removeEventListener(ev, handler, true));
+    const events = ['click', 'mousedown', 'mouseup', 'keydown', 'keypress', 'keyup', 'submit'];
+    
+    if (enable && !blockHandler) {
+        blockHandler = (e) => {
+            // Allow interaction with our dashboard regardless
+            if (e.composedPath && e.composedPath().some(el => el.id === 'agent-dashboard')) return;
+            e.stopImmediatePropagation();
+            e.preventDefault();
+        };
+        events.forEach(ev => window.addEventListener(ev, blockHandler, true));
+    } else if (!enable && blockHandler) {
+        events.forEach(ev => window.removeEventListener(ev, blockHandler, true));
+        blockHandler = null;
     }
 }
-
-let isBlocked = false;
 
 function updateDashboard(state) {
     const root = ensureDashboard();
     const statusEl = root.querySelector('.status');
+    const statusText = root.querySelector('.status-text');
     const queueEl = root.querySelector('.queue');
     const actionEl = root.querySelector('.last-action');
-    const blocker = root.querySelector('.blocker');
     const dot = root.querySelector('.dot');
+    const blockedBanner = root.querySelector('#blocked-banner');
 
-    if (state.status) {
-        // Update Status Text
-        // We reconstruct innerHTML to keep the dot
-        statusEl.innerHTML = '';
-        statusEl.appendChild(dot);
-        statusEl.append(document.createTextNode(state.status));
+    if (state.status && statusText) {
+        statusText.textContent = state.status;
 
-        let shouldBlock = false;
-
-        // Color Logic
         if (state.color) {
             if (state.color === 'green') dot.style.background = '#00ff00';
             else if (state.color === 'yellow') dot.style.background = '#ffff00';
             else dot.style.background = '#ff0000';
         }
 
-        // Blocking Logic
-        if (state.status.includes('Linked') || state.status.includes('Waiting') || state.status === 'Working') {
-            if (state.allowInput) {
-                blocker.style.display = 'none';
-                shouldBlock = false;
-            } else {
-                blocker.style.display = 'block';
+        // FIX: Only block interactions on TARGET tabs, never on the AGENT tab.
+        // The agent tab needs to remain fully interactive so the user can read AI responses.
+        let shouldBlock = false;
+
+        if (!state.isAgentTab && !state.allowInput) {
+            if (state.status === 'Working') {
                 shouldBlock = true;
             }
-        } else {
-            blocker.style.display = 'none';
-            shouldBlock = false;
         }
 
-        if (state.status === 'Idle') {
-             blocker.style.display = 'none';
-             shouldBlock = false;
+        // Update blocked banner
+        if (blockedBanner) {
+            blockedBanner.style.display = shouldBlock ? 'block' : 'none';
         }
 
-        // Apply Blocking
         if (shouldBlock !== isBlocked) {
             isBlocked = shouldBlock;
             blockInteractions(isBlocked);
         }
     }
 
-    if (state.queueLength !== undefined) queueEl.innerText = `Queue: ${state.queueLength}`;
-    if (state.lastAction) actionEl.innerText = state.lastAction;
+    if (state.queueLength !== undefined && queueEl) {
+        queueEl.innerText = `Queue: ${state.queueLength}`;
+    }
+    if (state.lastAction && actionEl) {
+        actionEl.innerText = state.lastAction;
+    }
 }
 
-// Hook into Agent Bridge
 if (chrome.runtime?.id) {
     chrome.runtime.onMessage.addListener((msg) => {
         if (msg.action === "DASHBOARD_UPDATE") {

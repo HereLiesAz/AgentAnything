@@ -1,0 +1,1935 @@
+# PROJECT BACKUP: 2026-02-26_09-35-32
+# NOTE: Binary files and 'libs' directory excluded.
+
+# --- PROJECT STRUCTURE ---
+├── .github
+│   └── dependabot.yml
+├── content
+│   ├── agent_bridge.js
+│   ├── agent_dashboard.js
+│   ├── network_hook.js
+│   └── target_adapter.js
+├── icons
+│   └── .tmp
+├── tests
+│   ├── background_test.js
+│   └── test_api.html
+├── background.js
+├── manifest.json
+├── offscreen.html
+├── offscreen.js
+├── options.html
+├── options.js
+├── popup.html
+├── popup.js
+├── readme.md
+├── welcome.html
+└── welcome.js
+
+# --- FILE CONTENTS ---
+
+## FILE: ./background.js
+// Service Worker V2.0 (Store-First Architecture)
+console.log("[AgentAnything] Background Service Worker V2 Loaded");
+
+// --- Configuration (Options) ---
+let CONFIG = { redactPII: true, debugMode: false, privacyAccepted: false };
+
+async function loadConfig() {
+    const items = await chrome.storage.sync.get({ redactPII: true, debugMode: false, privacyAccepted: false });
+    CONFIG = items;
+    log("[System] Config Loaded:", CONFIG);
+}
+
+function log(msg, ...args) {
+    if (CONFIG.debugMode) console.log(msg, ...args);
+}
+
+chrome.runtime.onStartup.addListener(loadConfig);
+chrome.runtime.onInstalled.addListener(() => {
+    chrome.storage.session.setAccessLevel({ accessLevel: 'TRUSTED_AND_UNTRUSTED_CONTEXTS' });
+
+    // Onboarding
+    chrome.storage.sync.get(['privacyAccepted'], (res) => {
+        if (!res.privacyAccepted) {
+            chrome.tabs.create({ url: 'welcome.html' });
+        }
+    });
+    loadConfig();
+});
+
+loadConfig();
+
+chrome.storage.onChanged.addListener((changes, area) => {
+    if (area === 'sync') {
+        if (changes.redactPII) CONFIG.redactPII = changes.redactPII.newValue;
+        if (changes.debugMode) CONFIG.debugMode = changes.debugMode.newValue;
+        if (changes.privacyAccepted) CONFIG.privacyAccepted = changes.privacyAccepted.newValue;
+        log("[System] Config Updated:", CONFIG);
+    }
+});
+
+
+// --- 1. State Persistence ---
+const DEFAULT_STATE = {
+    agentTabId: null,
+    agentUrl: null, // Store Agent URL for recovery
+    targetTabs: [],
+    commandQueue: [],
+    isAgentBusy: false,
+    busySince: 0,
+    elementMap: {},
+    lastActionTimestamp: 0,
+    observationMode: false,
+    sessionKeyword: null
+};
+
+// State Mutex
+let stateLock = Promise.resolve();
+async function withLock(fn) {
+    const currentLock = stateLock;
+    stateLock = (async () => {
+        try { await currentLock; } catch (e) { console.error("Lock recovery:", e); }
+        try { await fn(); } catch (e) { console.error("Lock task failed:", e); }
+    })();
+    return stateLock;
+}
+
+async function getState() {
+    const data = await chrome.storage.local.get(DEFAULT_STATE);
+    if (!Array.isArray(data.targetTabs)) data.targetTabs = [];
+    if (!Array.isArray(data.commandQueue)) data.commandQueue = [];
+    if (!data.elementMap) data.elementMap = {};
+    return { ...DEFAULT_STATE, ...data };
+}
+
+async function updateState(updates) {
+    await chrome.storage.local.set(updates);
+    broadcastStatus(updates); // Auto-broadcast on state update
+}
+
+// --- 2. Keep-Alive ---
+let keepAliveInterval;
+async function createOffscreen() {
+  try {
+    if (await chrome.offscreen.hasDocument()) return;
+    await chrome.offscreen.createDocument({
+      url: 'offscreen.html',
+      reasons: ['DOM_PARSING'],
+      justification: 'Keep service worker alive'
+    });
+  } catch (e) { log("Offscreen warning:", e); }
+}
+
+function startKeepAlive() {
+  createOffscreen();
+  if (keepAliveInterval) clearInterval(keepAliveInterval);
+  keepAliveInterval = setInterval(() => {
+    if (chrome.runtime?.id) {
+        chrome.runtime.sendMessage({ target: 'offscreen', action: 'ping' }).catch(() => {});
+    }
+    checkTimeout();
+  }, 20000);
+}
+chrome.runtime.onStartup.addListener(startKeepAlive);
+startKeepAlive();
+
+// --- 3. Command Processing ---
+
+chrome.storage.onChanged.addListener((changes, area) => {
+    if (area === 'local' && changes.commandQueue) {
+        const newQueue = changes.commandQueue.newValue;
+        if (newQueue && newQueue.length > 0) {
+            processQueue(newQueue);
+        }
+    }
+});
+
+let isProcessing = false;
+
+async function processQueue(queue) {
+    if (isProcessing) return;
+    isProcessing = true;
+
+    try {
+        const item = queue[0];
+        if (!item) { isProcessing = false; return; }
+
+        // Enforce Privacy Acceptance
+        if (!CONFIG.privacyAccepted) {
+            console.warn("[System] Privacy Warning not accepted. Blocking command.");
+            await withLock(async () => {
+                const s = await getState();
+                if (s.commandQueue.length > 0) await updateState({ commandQueue: s.commandQueue.slice(1) });
+            });
+            chrome.tabs.create({ url: 'welcome.html' });
+            return;
+        }
+
+        log(`[Queue] Processing: ${item.type}`);
+
+        let state = await getState();
+        const agentId = state.agentTabId;
+
+        if (item.type === 'UPDATE_AGENT') {
+            if (agentId) {
+                const safePayload = `<browsing_context>\n${item.payload}\n</browsing_context>`;
+                await sendMessageToTab(agentId, {
+                    action: "BUFFER_UPDATE",
+                    text: safePayload
+                });
+
+                // Update timestamp safe
+                await withLock(async () => { await updateState({ lastActionTimestamp: 0 }); });
+            }
+        }
+
+        if (item.type === 'CLICK_TARGET') {
+             const cmd = item.payload;
+             let targetId = cmd.targetId;
+
+             if (!targetId && cmd.id && state.elementMap[cmd.id]) {
+                 targetId = state.elementMap[cmd.id];
+             }
+
+             let targetsToTry = state.targetTabs;
+             if (targetId) {
+                 const t = state.targetTabs.find(tab => tab.tabId === targetId);
+                 if (t) targetsToTry = [t];
+             }
+
+             let executed = false;
+             for (const t of targetsToTry) {
+                 const res = await sendMessageToTab(t.tabId, { action: "GET_COORDINATES", id: cmd.id });
+                 if (res && res.found) {
+                     log(`[System] Executing on Target Tab ${t.tabId}`);
+                     if (cmd.action === 'click') {
+                         await executeBackgroundClick(t.tabId, res.x, res.y);
+                     } else if (cmd.action === 'type') {
+                         await executeBackgroundType(t.tabId, res.x, res.y, cmd.value);
+                     }
+                     executed = true;
+                     await withLock(async () => { await updateState({ lastActionTimestamp: Date.now() }); });
+                     break;
+                 }
+             }
+
+             if (!executed) {
+                 log(`[System] Failed to execute command. Element ID ${cmd.id} not found.`);
+                 await enqueue({ type: 'UPDATE_AGENT', payload: `System Error: Element ID ${cmd.id} not found.` });
+             }
+        }
+
+        // Safe Removal
+        await withLock(async () => {
+            const s = await getState();
+            if (s.commandQueue.length > 0) {
+                 await updateState({ commandQueue: s.commandQueue.slice(1) });
+            }
+        });
+
+    } catch (e) {
+        console.error("Queue Processing Error:", e);
+    } finally {
+        isProcessing = false;
+    }
+}
+
+// Timeout Logic (15s)
+async function checkTimeout() {
+    const state = await getState();
+    if (state.lastActionTimestamp > 0 && (Date.now() - state.lastActionTimestamp > 15000)) {
+        log("[System] Action Timeout. No DOM change detected.");
+        await updateState({ lastActionTimestamp: 0 });
+        await enqueue({ type: 'UPDATE_AGENT', payload: "System: Action executed but no DOM change detected within 15 seconds." });
+    }
+}
+
+// --- 4. Execution Engine ---
+
+// --- 4. Execution Engine ---
+
+async function executeBackgroundClick(tabId, x, y) {
+    const target = { tabId };
+    try {
+        await chrome.debugger.attach(target, "1.3");
+        await chrome.debugger.sendCommand(target, "Input.dispatchMouseEvent", {
+            type: "mousePressed", x, y, button: "left", clickCount: 1
+        });
+        await chrome.debugger.sendCommand(target, "Input.dispatchMouseEvent", {
+            type: "mouseReleased", x, y, button: "left", clickCount: 1
+        });
+    } catch (e) {
+        log(`Debugger click failed on ${tabId}: ${e.message}`);
+    } finally {
+        try { await chrome.debugger.detach(target); } catch(e) { console.error(e); }
+    }
+}
+
+async function executeBackgroundType(tabId, x, y, value) {
+    const target = { tabId };
+    try {
+        await chrome.debugger.attach(target, "1.3");
+        await chrome.debugger.sendCommand(target, "Input.dispatchMouseEvent", {
+            type: "mousePressed", x, y, button: "left", clickCount: 1
+        });
+        await chrome.debugger.sendCommand(target, "Input.dispatchMouseEvent", {
+            type: "mouseReleased", x, y, button: "left", clickCount: 1
+        });
+        
+        for (const char of value) {
+             await chrome.debugger.sendCommand(target, "Input.dispatchKeyEvent", { type: "keyDown", text: char });
+             await chrome.debugger.sendCommand(target, "Input.dispatchKeyEvent", { type: "keyUp" });
+        }
+    } catch (e) {
+        log(`Debugger type failed on ${tabId}: ${e.message}`);
+    } finally {
+        try { await chrome.debugger.detach(target); } catch(e) { console.error(e); }
+    }
+}
+
+
+// --- 5. Message Routing ---
+
+// sendMessageToTab was declared twice in the previous version. Removed the second declaration.
+async function sendMessageToTab(tabId, message) {
+    try {
+        return await chrome.tabs.sendMessage(tabId, message);
+    } catch (e) { return null; }
+}
+
+async function broadcastStatus(changes) {
+    const state = await getState();
+    let status = "Idle";
+    let color = "red"; // Default to error/unknown
+    let allowInput = false;
+
+    if (state.observationMode) {
+        status = "Waiting for Intro... (Manual Override Active)";
+        color = "yellow";
+        allowInput = true;
+    } else if (state.agentTabId && state.targetTabs.length > 0) {
+        if (state.commandQueue.length > 0) {
+            status = "Working";
+            color = "green";
+        } else {
+            status = "Linked (Waiting)";
+            color = "yellow";
+        }
+    } else if (state.agentTabId) {
+        status = "Waiting for Target";
+        color = "yellow";
+    } else if (state.targetTabs.length > 0) {
+        status = "Waiting for Agent";
+        color = "yellow";
+    }
+
+    const payload = {
+        status: status,
+        color: color,
+        queueLength: state.commandQueue.length,
+        lastAction: state.lastActionTimestamp ? "Active" : "Waiting...",
+        allowInput: allowInput
+    };
+
+    if (state.agentTabId) sendMessageToTab(state.agentTabId, { action: "DASHBOARD_UPDATE", payload });
+    state.targetTabs.forEach(t => sendMessageToTab(t.tabId, { action: "DASHBOARD_UPDATE", payload }));
+}
+
+chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+    (async () => {
+        let state = await getState();
+        const tabId = sender.tab ? sender.tab.id : null;
+
+        if (msg.action === "HELLO" && tabId) {
+            if (state.agentTabId === tabId) {
+                sendMessageToTab(tabId, { action: "INIT_AGENT" });
+            } else if (state.targetTabs.some(t => t.tabId === tabId)) {
+                sendMessageToTab(tabId, { action: "INIT_TARGET", config: CONFIG });
+            }
+        }
+
+        if (msg.action === "ASSIGN_ROLE") {
+            await withLock(async () => {
+                // Refresh state inside lock
+                state = await getState();
+                const role = msg.role;
+                const tid = msg.tabId;
+
+                if (role === 'AGENT') {
+                    // Prevent duplicate init
+                    if (state.agentTabId === tid) return;
+
+                    const targets = state.targetTabs.filter(t => t.tabId !== tid);
+
+                    // Generate unique session keyword
+                    const safeGetHostname = (u) => {
+                        try { return new URL(u).hostname; } catch (e) { return "unknown"; }
+                    };
+                    const targetDomain = targets.length > 0 ? safeGetHostname(targets[0].url) : "unknown";
+                    const agentDomain = sender.tab?.url ? safeGetHostname(sender.tab.url) : "unknown";
+                    const sessionKeyword = `[END:${targetDomain}-${agentDomain}-${Date.now()}]`;
+
+                    const taskDescription = msg.task ? `\n\nYOUR GOAL: ${msg.task}` : "";
+                    const initialPrompt = `You are an autonomous agent. I will feed you the state of another tab. Output commands like \`interact\` to interact.${taskDescription}\n\nIMPORTANT: End EVERY response with this exact keyword: ${sessionKeyword}`;
+
+                    await updateState({
+                        agentTabId: tid,
+                        agentUrl: sender.tab?.url || "", // Capture Agent URL
+                        targetTabs: targets,
+                        // commandQueue: [], // Preserve existing queue (e.g. Target Maps)
+                        elementMap: {},
+                        lastActionTimestamp: 0,
+                        observationMode: true,
+                        sessionKeyword: sessionKeyword
+                    });
+
+                    sendMessageToTab(tid, { action: "INIT_AGENT", keyword: sessionKeyword });
+
+                    // Immediate execution of first prompt (Bypass Queue)
+                    const safePayload = `<browsing_context>\n${initialPrompt}\n</browsing_context>`;
+                    setTimeout(() => {
+                        sendMessageToTab(tid, { action: "EXECUTE_PROMPT", text: safePayload });
+                    }, 500); // Small delay to ensure INIT is processed
+
+                } else {
+                    // Check if already assigned
+                    if (state.targetTabs.some(t => t.tabId === tid)) return;
+
+                    let targets = [...state.targetTabs];
+                    targets.push({ tabId: tid, url: sender.tab?.url || "" });
+
+                    const agent = state.agentTabId === tid ? null : state.agentTabId;
+                    await updateState({ targetTabs: targets, agentTabId: agent });
+                    sendMessageToTab(tid, { action: "INIT_TARGET", config: CONFIG });
+                }
+            });
+        }
+
+        if (msg.action === "TARGET_UPDATE") {
+            if (msg.elementIds && Array.isArray(msg.elementIds)) {
+                const newMap = { ...state.elementMap };
+                msg.elementIds.forEach(id => newMap[id] = tabId);
+                await updateState({ elementMap: newMap });
+            }
+            await enqueue({ type: 'UPDATE_AGENT', payload: msg.payload });
+        }
+
+        if (msg.action === "AGENT_COMMAND") {
+            await enqueue({ type: 'CLICK_TARGET', payload: msg.payload });
+        }
+
+        // Handle Intro Completion
+        if (msg.action === "INTRO_COMPLETE") {
+            log("[System] Intro Complete. Exiting Observation Mode.");
+            await withLock(async () => {
+                const s = await getState();
+                if (s.observationMode) {
+                    await updateState({ observationMode: false });
+                    // If we have items in the queue (e.g., target map), they will be processed naturally
+                    // by the next queue check or update trigger. Since we just finished intro,
+                    // we might want to force a queue check if queue > 0.
+                    if (s.commandQueue.length > 0) {
+                        processQueue(s.commandQueue);
+                    }
+                }
+            });
+        }
+
+        // Handle User Interruption
+        if (msg.action === "USER_INTERRUPT") {
+            log("[System] User Interruption Detected. Ignoring.");
+            // await updateState({ commandQueue: [], lastActionTimestamp: 0 });
+            // await enqueue({ type: 'UPDATE_AGENT', payload: "System: User manually interacted with the page. Queue cleared. Please re-assess state." });
+        }
+
+        if (msg.action === "DISENGAGE_ALL") {
+            log("[System] Disengaging all tabs.");
+            await withLock(async () => {
+                const s = await getState();
+                // Notify before clearing
+                const payload = { status: "Idle", queueLength: 0, lastAction: "Disengaged" };
+                if (s.agentTabId) sendMessageToTab(s.agentTabId, { action: "DASHBOARD_UPDATE", payload });
+                s.targetTabs.forEach(t => sendMessageToTab(t.tabId, { action: "DASHBOARD_UPDATE", payload }));
+
+                await updateState({
+                    agentTabId: null,
+                    targetTabs: [],
+                    commandQueue: [],
+                    elementMap: {},
+                    lastActionTimestamp: 0,
+                    observationMode: false,
+                    sessionKeyword: null
+                });
+            });
+        }
+
+    })();
+    return true;
+});
+
+// Tab Recovery Logic
+chrome.tabs.onRemoved.addListener(async (tabId) => {
+    await withLock(async () => {
+        const state = await getState();
+
+        // Recover Agent
+        if (state.agentTabId === tabId && state.agentUrl) {
+            log("[System] Agent tab closed. Recovering...");
+            try {
+                const newTab = await chrome.tabs.create({ url: state.agentUrl, active: false });
+                await updateState({ agentTabId: newTab.id });
+                // We rely on content script sending HELLO or user re-assigning,
+                // but actually we should try to re-init if possible.
+                // However, without content script ready, sendMessage fails.
+                // Best we can do is update ID so if it reloads it might reconnect if we had persistent checks.
+                // But simplified: Just open it. User might need to re-assign if content script doesn't auto-handshake.
+            } catch (e) { console.error("Agent recovery failed:", e); }
+        }
+
+        // Recover Targets
+        const targetIndex = state.targetTabs.findIndex(t => t.tabId === tabId);
+        if (targetIndex !== -1) {
+            const target = state.targetTabs[targetIndex];
+            if (target.url) {
+                log(`[System] Target tab ${tabId} closed. Recovering...`);
+                try {
+                    const newTab = await chrome.tabs.create({ url: target.url, active: false });
+                    const newTargets = [...state.targetTabs];
+                    newTargets[targetIndex] = { ...target, tabId: newTab.id };
+                    await updateState({ targetTabs: newTargets });
+                } catch (e) { console.error("Target recovery failed:", e); }
+            }
+        }
+    });
+});
+
+async function enqueue(item) {
+    await withLock(async () => {
+        const state = await getState();
+        const q = [...state.commandQueue, item];
+        await updateState({ commandQueue: q });
+    });
+}
+
+## FILE: ./manifest.json
+{
+  "manifest_version": 3,
+  "name": "AgentAnything",
+  "version": "0.24.3",
+  "description": "Autonomous multi-agent browser orchestration. V2.4 (REST API Tool)",
+  "permissions": [
+    "scripting",
+    "tabs",
+    "storage",
+    "offscreen",
+    "debugger"
+  ],
+  "host_permissions": [
+    "<all_urls>"
+  ],
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "action": {
+    "default_popup": "popup.html",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
+  },
+  "options_page": "options.html",
+  "icons": {
+      "16": "icons/icon16.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+  },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["content/target_adapter.js", "content/agent_dashboard.js"],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": [
+        "https://chatgpt.com/*",
+        "https://claude.ai/*",
+        "https://gemini.google.com/*",
+        "https://aistudio.google.com/*"
+      ],
+      "js": ["content/agent_bridge.js", "content/agent_dashboard.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": ["assets/*", "content/network_hook.js"],
+      "matches": ["<all_urls>"]
+    }
+  ]
+}
+
+## FILE: ./offscreen.html
+<!DOCTYPE html>
+<html>
+  <script src="offscreen.js"></script>
+</html>
+
+## FILE: ./offscreen.js
+// Keeps the service worker alive by receiving messages
+chrome.runtime.onMessage.addListener((msg) => {
+    if (msg.target === 'offscreen' && msg.action === 'ping') {
+        console.debug("Ping received");
+    }
+});
+
+## FILE: ./options.html
+<!DOCTYPE html>
+<html>
+<head>
+    <title>AgentAnything Options</title>
+    <style>
+        body { font-family: sans-serif; padding: 20px; max-width: 600px; margin: 0 auto; background: #f4f4f4; }
+        .card { background: #fff; padding: 20px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
+        h2 { margin-top: 0; }
+        label { display: block; margin-bottom: 10px; cursor: pointer; }
+        input[type="checkbox"] { margin-right: 10px; }
+        button { background: #007bff; color: white; border: none; padding: 10px 20px; border-radius: 4px; cursor: pointer; }
+        button:hover { background: #0056b3; }
+        .status { margin-top: 10px; color: green; font-weight: bold; }
+    </style>
+</head>
+<body>
+    <div class="card">
+        <h2>AgentAnything Configuration</h2>
+
+        <label>
+            <input type="checkbox" id="redactPII">
+            Redact Sensitive PII (Emails, Phones, Credit Cards)
+        </label>
+
+        <label>
+            <input type="checkbox" id="debugMode">
+            Enable Debug Mode (Verbose Logging)
+        </label>
+
+        <button id="save">Save Settings</button>
+        <div id="status" class="status"></div>
+    </div>
+    <script src="options.js"></script>
+</body>
+</html>
+
+## FILE: ./options.js
+// Options Logic
+document.addEventListener('DOMContentLoaded', restoreOptions);
+document.getElementById('save').addEventListener('click', saveOptions);
+
+function saveOptions() {
+    const redactPII = document.getElementById('redactPII').checked;
+    const debugMode = document.getElementById('debugMode').checked;
+    
+    chrome.storage.sync.set({
+        redactPII: redactPII,
+        debugMode: debugMode
+    }, () => {
+        const status = document.getElementById('status');
+        status.textContent = 'Options saved.';
+        setTimeout(() => { status.textContent = ''; }, 2000);
+    });
+}
+
+function restoreOptions() {
+    chrome.storage.sync.get({
+        redactPII: true, // Default true for safety
+        debugMode: false
+    }, (items) => {
+        document.getElementById('redactPII').checked = items.redactPII;
+        document.getElementById('debugMode').checked = items.debugMode;
+    });
+}
+
+## FILE: ./popup.html
+<!DOCTYPE html>
+<html>
+<head>
+  <style>
+    body { width: 300px; background: #1e1e1e; color: #e0e0e0; font-family: -apple-system, sans-serif; padding: 15px; }
+    h2 { margin: 0 0 10px 0; font-size: 14px; border-bottom: 1px solid #333; padding-bottom: 5px; color: #fff; display: flex; justify-content: space-between; }
+    
+    .btn { display: block; width: 100%; padding: 10px; margin-bottom: 8px; border: none; border-radius: 4px; cursor: pointer; font-weight: 600; font-size: 12px; transition: 0.2s; }
+    .btn-agent { background: #88c0d0; color: #1e1e1e; }
+    .btn-agent:hover { background: #9cd1e1; }
+    .btn-target { background: #bf616a; color: #fff; }
+    .btn-target:hover { background: #d0727b; }
+    .btn-done { background: #2e3440; color: #a3be8c; border: 1px solid #a3be8c; cursor: default; }
+    .btn-opt { background: #2e3440; color: #d8dee9; border: 1px solid #4c566a; }
+    .btn-opt:hover { background: #3b4252; color: #fff; }
+
+    @keyframes pulse-border {
+      0% { box-shadow: 0 0 0 0 rgba(191, 97, 106, 0.7); }
+      70% { box-shadow: 0 0 0 6px rgba(191, 97, 106, 0); }
+      100% { box-shadow: 0 0 0 0 rgba(191, 97, 106, 0); }
+    }
+    .btn-pulse { animation: pulse-border 1.5s infinite; }
+
+    .btn-send { background: #a3be8c; color: #1e1e1e; margin-top: 5px; }
+    .btn-kill { background: transparent; border: 1px solid #bf616a; color: #bf616a; margin-top: 15px; font-size: 10px; }
+    .btn-kill:hover { background: #bf616a; color: #fff; }
+    .btn-reset { background: transparent; border: none; color: #666; font-size: 10px; margin-top: 5px; width: auto; display: inline-block; padding: 5px; }
+    .btn-reset:hover { color: #fff; text-decoration: underline; }
+
+    textarea { width: 100%; height: 60px; background: #252525; border: 1px solid #444; color: #fff; border-radius: 3px; padding: 5px; resize: none; font-family: inherit; font-size: 11px; box-sizing: border-box; }
+    textarea:focus { outline: none; border-color: #88c0d0; }
+
+    .status { font-size: 10px; color: #888; margin-bottom: 10px; }
+    .info { font-size: 11px; color: #aaa; margin-bottom: 15px; line-height: 1.4; }
+    
+    #view-active { display: none; }
+  </style>
+</head>
+<body>
+
+  <div id="view-setup">
+    <h2>Configuration</h2>
+    <div class="info">
+      <strong>Step 1:</strong> Assign Agent (LLM Tab)<br>
+      <strong>Step 2:</strong> Assign Target (Tool Tab)
+    </div>
+    
+    <textarea id="task-input" placeholder="Enter task description (e.g., 'Find the cheapest flight to Tokyo')..." style="margin-bottom: 8px; height: 50px;"></textarea>
+
+    <button id="btn-agent" class="btn btn-agent">ASSIGN: AGENT</button>
+    <button id="btn-target" class="btn btn-target">ASSIGN: TARGET</button>
+    
+    <div style="margin-top: 15px; border-top: 1px solid #333; padding-top: 10px;">
+        <button id="btn-options" class="btn btn-opt">CONTEXT MEMORY</button>
+    </div>
+    
+    <div style="text-align: center;">
+      <button id="btn-reset-setup" class="btn-reset">Reset / Disengage</button>
+    </div>
+  </div>
+
+  <div id="view-active">
+    <h2>Agent Control <span id="role-indicator"></span></h2>
+    <div class="status">System Active. Trap Armed.</div>
+    
+    <textarea id="remote-input" placeholder="Interject command (e.g., 'Stop and summarize')..."></textarea>
+    <button id="btn-inject" class="btn btn-send">SEND COMMAND</button>
+
+    <div style="margin-top: 10px; display: flex; gap: 5px;">
+        <button id="btn-options-active" class="btn btn-opt" style="flex:1;">MEMORY</button>
+        <button id="btn-kill" class="btn btn-kill" style="flex:1; margin-top:0;">DISENGAGE</button>
+    </div>
+  </div>
+
+  <script src="popup.js"></script>
+</body>
+</html>
+
+## FILE: ./popup.js
+document.addEventListener('DOMContentLoaded', async () => {
+    const viewSetup = document.getElementById('view-setup');
+    const viewActive = document.getElementById('view-active');
+    const txtInput = document.getElementById('remote-input');
+    
+    // Buttons
+    const btnAgent = document.getElementById('btn-agent');
+    const btnTarget = document.getElementById('btn-target');
+    const btnInject = document.getElementById('btn-inject');
+    const btnKill = document.getElementById('btn-kill');
+    const btnOptions = document.getElementById('btn-options');
+    const btnOptionsActive = document.getElementById('btn-options-active');
+
+    // 1. CHECK STATE
+    const store = await chrome.storage.session.get(['agentTabId', 'targetTabIds']);
+    const hasAgent = !!store.agentTabId;
+    const hasTarget = store.targetTabIds && store.targetTabIds.length > 0;
+    
+    if (hasAgent && hasTarget) {
+        viewSetup.style.display = 'none';
+        viewActive.style.display = 'block';
+    } else {
+        viewSetup.style.display = 'block';
+        viewActive.style.display = 'none';
+        
+        if (hasAgent) {
+            btnAgent.innerText = "AGENT ASSIGNED ✅";
+            btnAgent.classList.add('btn-done');
+            btnAgent.disabled = true; 
+            btnTarget.classList.add('btn-pulse');
+        }
+        
+        if (hasTarget) {
+            btnTarget.innerText = `TARGETS ASSIGNED (${store.targetTabIds.length}) ✅`;
+            btnTarget.classList.add('btn-done');
+        }
+    }
+
+    // 2. ASSIGN AGENT
+    btnAgent.onclick = async () => {
+        const tabs = await chrome.tabs.query({active: true, currentWindow: true});
+        const task = document.getElementById('task-input').value.trim();
+        chrome.runtime.sendMessage({ action: "ASSIGN_ROLE", role: "AGENT", tabId: tabs[0].id, task: task });
+        window.close();
+    };
+
+    // 3. ASSIGN TARGET
+    btnTarget.onclick = async () => {
+        const tabs = await chrome.tabs.query({active: true, currentWindow: true});
+        chrome.runtime.sendMessage({ action: "ASSIGN_ROLE", role: "TARGET", tabId: tabs[0].id });
+        window.close();
+    };
+
+    // 4. REMOTE INJECT
+    btnInject.onclick = async () => {
+        const text = txtInput.value.trim();
+        if (!text || !store.agentTabId) return;
+        
+        btnInject.disabled = true;
+        btnInject.innerText = "SENDING...";
+
+        chrome.runtime.sendMessage({ 
+            action: "REMOTE_INJECT", 
+            payload: text 
+        });
+
+        setTimeout(() => { 
+            btnInject.disabled = false; 
+            btnInject.innerText = "SEND COMMAND"; 
+            txtInput.value = "";
+        }, 1000);
+    };
+
+    // 5. DISENGAGE
+    const handleDisengage = () => {
+        chrome.runtime.sendMessage({ action: "DISENGAGE_ALL" });
+        setTimeout(() => location.reload(), 500);
+    };
+
+    // 6. OPTIONS LINK
+    const openOptions = () => {
+        if (chrome.runtime.openOptionsPage) {
+            chrome.runtime.openOptionsPage();
+        } else {
+            window.open(chrome.runtime.getURL('options.html'));
+        }
+    };
+
+    btnKill.onclick = handleDisengage;
+
+    // Explicitly wire the Reset/Disengage button to sending DISENGAGE_ALL
+    const resetBtn = document.getElementById('btn-reset-setup');
+    if (resetBtn) {
+        resetBtn.onclick = () => {
+            chrome.runtime.sendMessage({ action: "DISENGAGE_ALL" });
+            setTimeout(() => location.reload(), 500);
+        };
+    }
+    
+    if(btnOptions) btnOptions.onclick = openOptions;
+    if(btnOptionsActive) btnOptionsActive.onclick = openOptions;
+});
+
+## FILE: ./readme.md
+# AgentAnything V2
+
+> "Turn one tab into the Agent, another tab into its tool."
+
+**AgentAnything** is a Chrome Extension that transforms a standard browsing session into a master-slave architecture, allowing an AI (running in the **Agent** tab) to programmatically control, read, and manipulate any other website (the **Target** tab).
+
+**Version 2.0 Feature Set:**
+*   **Agent Bridge**: Robustly injects prompts into ChatGPT, Claude, and Gemini using advanced framework bypass techniques (React/ProseMirror support).
+*   **Semantic Parser**: Distills complex web pages into a compressed XML/Markdown schema, saving tokens while preserving context.
+*   **Secure Execution**: Uses the Chrome Debugger API to execute clicks and keystrokes in background tabs without stealing focus.
+*   **Privacy First**: Automatically redacts PII (emails, phone numbers, credit cards) before sending data to the AI.
+*   **Multi-Tab Control**: Can manage multiple target tabs simultaneously.
+
+## 📂 File Structure
+
+* `manifest.json`: Manifest V3 configuration.
+* `background.js`: Store-First Service Worker. Manages state, queues commands, and enforces privacy policies.
+* `content/`:
+    * `agent_bridge.js`: Injects prompts and parses AI responses.
+    * `target_adapter.js`: Scrapes DOM, redacts PII, and detects user interruptions.
+    * `agent_dashboard.js`: Visual status panel.
+* `welcome.html`: Privacy onboarding flow.
+* `options.html`: Configuration settings.
+
+## 🔧 Installation (Sideload)
+
+1.  Clone this repository.
+2.  Open Chrome and navigate to `chrome://extensions`.
+3.  Enable **Developer mode** (top right toggle).
+4.  Click **Load unpacked**.
+5.  Select the `AgentAnything` directory.
+6.  **Important**: You must complete the Privacy Onboarding that opens automatically to enable the extension.
+
+## 🕹️ Usage
+
+1.  **Assign Agent**: Open your AI (ChatGPT/Claude), click extension -> **MAKE AGENT**.
+2.  **Assign Target**: Open a website, click extension -> **MAKE TARGET**.
+3.  **Command**: In the Agent tab, type a command (e.g., "Find the cheapest flight to Tokyo").
+4.  **Observe**: The Agent will autonomously browse the target tab.
+
+## ⚠️ Privacy Warning
+
+This tool transmits page content from your "Target" tabs to the "Agent" tab (your active AI provider session). While PII is redacted locally, you are responsible for the data you choose to share with the AI.
+
+## 🧪 Development
+
+Run tests:
+```bash
+node tests/background_test.js
+```
+
+## 📜 License
+
+MIT.
+
+## FILE: ./welcome.html
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Welcome to AgentAnything</title>
+    <style>
+        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background: #222; color: #eee; padding: 40px; max-width: 800px; margin: 0 auto; line-height: 1.6; }
+        .container { background: #333; padding: 30px; border-radius: 12px; box-shadow: 0 10px 30px rgba(0,0,0,0.5); }
+        h1 { color: #00ff00; margin-top: 0; }
+        h2 { border-bottom: 1px solid #555; padding-bottom: 10px; }
+        .warning { background: #442a2a; border-left: 5px solid #ff4444; padding: 15px; margin: 20px 0; }
+        .warning h3 { margin-top: 0; color: #ff8888; }
+        button { background: #00ff00; color: #000; border: none; padding: 15px 30px; font-size: 18px; font-weight: bold; border-radius: 6px; cursor: pointer; transition: all 0.2s; margin-top: 20px; }
+        button:hover { background: #00cc00; transform: scale(1.02); }
+        button:disabled { background: #555; color: #888; cursor: not-allowed; transform: none; }
+        .steps { counter-reset: step; }
+        .steps li { list-style: none; margin-bottom: 10px; position: relative; padding-left: 30px; }
+        .steps li:before { counter-increment: step; content: counter(step); position: absolute; left: 0; top: 0; width: 24px; height: 24px; background: #555; border-radius: 50%; text-align: center; line-height: 24px; font-size: 12px; font-weight: bold; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Welcome to AgentAnything V2</h1>
+        <p>You have installed the autonomous browser orchestration layer. Before you begin, you must understand and accept the operational security implications.</p>
+
+        <div class="warning">
+            <h3>⚠️ Privacy & Data Warning</h3>
+            <p><strong>AgentAnything acts as a bridge.</strong> When you assign a tab as a "Target", this extension will:</p>
+            <ul>
+                <li>Scrape the text and interactive elements of that page.</li>
+                <li>Redact detected PII (Emails, Phone Numbers, Credit Cards).</li>
+                <li><strong>Transmit this data</strong> to the "Agent" tab (e.g., ChatGPT, Claude, Gemini).</li>
+            </ul>
+            <p>By proceeding, you acknowledge that page content from Target tabs will be sent to your active AI provider's servers according to their privacy policy. Do not use this tool on tabs containing sensitive personal or financial data that you do not wish to share with the AI.</p>
+        </div>
+
+        <h2>How to Use</h2>
+        <ol class="steps">
+            <li>Open an AI chat (ChatGPT, Claude, etc.) and click the extension icon -> <strong>MAKE AGENT</strong>.</li>
+            <li>Navigate to a website you want to control and click the extension icon -> <strong>MAKE TARGET</strong>.</li>
+            <li>Type a command in the Agent tab (e.g., "Find the latest news").</li>
+            <li>Watch the Agent autonomously control the Target tab.</li>
+        </ol>
+
+        <button id="acceptBtn">I Understand & Enable AgentAnything</button>
+    </div>
+    <script src="welcome.js"></script>
+</body>
+</html>
+
+## FILE: ./welcome.js
+document.getElementById('acceptBtn').addEventListener('click', () => {
+    chrome.storage.sync.set({ privacyAccepted: true }, () => {
+        alert("Setup Complete! You can now use the extension.");
+        window.close();
+    });
+});
+
+## FILE: ./tests/background_test.js
+const assert = require('assert');
+
+// Mock Chrome Storage Local
+const storage = {
+    local: {
+        _data: {},
+        get: async (keys) => {
+            if (typeof keys === 'string') return { [keys]: storage.local._data[keys] };
+            if (Array.isArray(keys)) {
+                let res = {};
+                keys.forEach(k => res[k] = storage.local._data[k]);
+                return res;
+            }
+            if (typeof keys === 'object') {
+                 let res = {};
+                 for (let k in keys) {
+                     res[k] = storage.local._data[k] !== undefined ? storage.local._data[k] : keys[k];
+                 }
+                 return res;
+            }
+            return storage.local._data;
+        },
+        set: async (items) => {
+            Object.assign(storage.local._data, items);
+            if (storage.onChanged.listeners.length > 0) {
+                 storage.onChanged.listeners.forEach(fn => fn({
+                     commandQueue: { newValue: items.commandQueue }
+                 }, 'local'));
+            }
+        },
+    },
+    onChanged: {
+        listeners: [],
+        addListener: (fn) => storage.onChanged.listeners.push(fn)
+    }
+};
+
+global.chrome = { storage };
+
+// --- Copy Background Logic (Simplified) ---
+const DEFAULT_STATE = {
+    agentTabId: null,
+    targetTabs: [],
+    commandQueue: [],
+    lastActionTimestamp: 0
+};
+
+async function getState() {
+    const data = await chrome.storage.local.get(DEFAULT_STATE);
+    if (!Array.isArray(data.targetTabs)) data.targetTabs = [];
+    if (!Array.isArray(data.commandQueue)) data.commandQueue = [];
+    return { ...DEFAULT_STATE, ...data };
+}
+
+async function updateState(updates) {
+    await chrome.storage.local.set(updates);
+}
+
+// Timeout Logic
+async function checkTimeout() {
+    const state = await getState();
+    if (state.lastActionTimestamp > 0 && (Date.now() - state.lastActionTimestamp > 15000)) {
+        await updateState({ lastActionTimestamp: 0 });
+        // Simulating enqueuing error
+        global.timeoutFired = true;
+    }
+}
+
+// Interrupt Logic
+async function handleInterrupt() {
+    await updateState({ commandQueue: [], lastActionTimestamp: 0 });
+}
+
+
+// --- TESTS ---
+
+async function runTests() {
+    console.log("Running Background Robustness Tests...");
+
+    // Test 1: Timeout Logic
+    await updateState({ lastActionTimestamp: Date.now() - 20000 }); // 20s ago
+    global.timeoutFired = false;
+    await checkTimeout();
+    assert.strictEqual(global.timeoutFired, true, "Timeout should fire after 15s");
+    let state = await getState();
+    assert.strictEqual(state.lastActionTimestamp, 0, "Timeout should reset timestamp");
+
+    // Test 2: Interrupt Logic
+    await updateState({ commandQueue: [{type: 'CMD1'}, {type: 'CMD2'}] });
+    await handleInterrupt();
+    state = await getState();
+    assert.strictEqual(state.commandQueue.length, 0, "Interrupt should clear queue");
+
+    console.log("All Robustness Tests Passed!");
+}
+
+runTests().catch(e => {
+    console.error("Test Failed:", e);
+    process.exit(1);
+});
+
+## FILE: ./tests/test_api.html
+<!DOCTYPE html>
+<html>
+<body>
+    <button id="apiBtn">Trigger API</button>
+    <script>
+        document.getElementById('apiBtn').onclick = () => {
+            fetch('/api/test', { method: 'POST', body: JSON.stringify({foo: 'bar'}) });
+        };
+    </script>
+</body>
+</html>
+
+## FILE: ./content/agent_bridge.js
+(function() {
+// Agent Bridge - Specialized Input Injection Module (V2.0)
+console.log("[AgentAnything] Agent Bridge V2 Loaded");
+
+// --- 1. Selector Config (Phase 1) ---
+const SELECTORS = {
+    chatgpt: {
+        input: '#prompt-textarea',
+        submit: 'button[data-testid="send-button"]',
+        stop: 'button[aria-label="Stop generating"]',
+        lastMessage: 'div[data-message-author-role="assistant"]:last-of-type'
+    },
+    claude: {
+        input: '.ProseMirror[contenteditable="true"]',
+        submit: 'button[aria-label="Send Message"]',
+        stop: '.result-streaming',
+        lastMessage: '.font-claude-message:last-of-type'
+    },
+    gemini: {
+        input: '.ql-editor, div[contenteditable="true"]',
+        submit: '.send-button, button[aria-label="Send message"]',
+        stop: '.run-spinner',
+        lastMessage: 'message-content:last-of-type'
+    }
+};
+
+// --- 2. Detection ---
+function getProvider() {
+    const host = window.location.hostname;
+    if (host.includes('chatgpt')) return 'chatgpt';
+    if (host.includes('claude')) return 'claude';
+    if (host.includes('gemini') || host.includes('aistudio')) return 'gemini';
+    return null;
+}
+
+const PROVIDER = getProvider();
+console.log(`[AgentAnything] Bridge Active for: ${PROVIDER}`);
+
+// --- 2.1 Observation Mode State ---
+let observationMode = false;
+let sessionKeyword = null;
+let learnedSelectors = { input: null, submit: null };
+let potentialSelectors = { input: null, submit: null };
+
+// Capture candidates
+window.addEventListener('click', (e) => {
+    if (observationMode) potentialSelectors.submit = e.target;
+}, true);
+
+window.addEventListener('focus', (e) => {
+    if (observationMode) {
+        const t = e.target;
+        if (t.isContentEditable || t.tagName === 'INPUT' || t.tagName === 'TEXTAREA') {
+            potentialSelectors.input = t;
+        }
+    }
+}, true);
+window.addEventListener('input', (e) => {
+    if (observationMode) potentialSelectors.input = e.target;
+}, true);
+
+
+// --- 3. React Injection Logic (Phase 1) ---
+function setReactValue(element, value) {
+    element.focus();
+    const lastValue = element.value;
+    element.value = value;
+    const event = new Event('input', { bubbles: true });
+    const changeEvent = new Event('change', { bubbles: true });
+    // Hack to trigger React's internal state tracker
+    const tracker = element._valueTracker;
+    if (tracker) { tracker.setValue(lastValue); }
+    element.dispatchEvent(event);
+    element.dispatchEvent(changeEvent);
+}
+
+// --- 3.2 ContentEditable Injection Logic ---
+function setContentEditableValue(element, value) {
+    element.focus();
+    element.innerHTML = '<p><br></p>'; // Reset
+    const success = document.execCommand('insertText', false, value);
+
+    if (!success) {
+        console.warn("execCommand failed, using fallback");
+        element.innerHTML = `<p>${value}</p>`;
+        element.dispatchEvent(new Event('input', { bubbles: true }));
+    }
+}
+
+// --- 3.3 Click Simulation ---
+function simulateClick(element) {
+    const options = { bubbles: true, cancelable: true, view: window };
+    const hasPointer = typeof PointerEvent !== 'undefined';
+    const events = hasPointer ?
+        ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click'] :
+        ['mousedown', 'mouseup', 'click'];
+
+    events.forEach(type => {
+        const Ctor = hasPointer && type.startsWith('pointer') ? PointerEvent : MouseEvent;
+        element.dispatchEvent(new Ctor(type, options));
+    });
+}
+
+
+// --- 3.4 Determining "Busy" State ---
+function isBusy() {
+    const config = SELECTORS[PROVIDER];
+    if (!config) return false;
+    if (document.querySelector(config.stop)) return true;
+    if (document.querySelector('.result-streaming')) return true;
+    return false;
+}
+
+
+// --- 4. Message Listener (Phase 1) ---
+chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
+    if (request.action === "INIT_AGENT") {
+        if (request.keyword) {
+            sessionKeyword = request.keyword;
+            observationMode = true;
+            // Reset learned selectors for new session
+            learnedSelectors = { input: null, submit: null };
+            potentialSelectors = { input: null, submit: null };
+            console.log(`[AgentAnything] Observation Mode Active. Keyword: ${sessionKeyword}`);
+        }
+    }
+
+    // Direct Execution
+    if (request.action === "EXECUTE_PROMPT") {
+        executePrompt(request.text);
+        sendResponse({status: "success"});
+        return true;
+    }
+
+    // Buffered Update
+    if (request.action === "BUFFER_UPDATE") {
+        bufferUpdate(request.text);
+        sendResponse({status: "buffered"});
+        return true;
+    }
+});
+
+async function executePrompt(text) {
+    const config = SELECTORS[PROVIDER];
+    if (!config) return;
+
+    // Attempt Copy if in Observation Mode
+    if (observationMode) {
+        navigator.clipboard.writeText(text).catch(e => console.warn("Clipboard write failed", e));
+    }
+
+    let inputEl = learnedSelectors.input || document.querySelector(config.input);
+    if (!inputEl) {
+        console.error("Input not found");
+        return;
+    }
+
+    if (PROVIDER === 'chatgpt') {
+        setReactValue(inputEl, text);
+    } else {
+        setContentEditableValue(inputEl, text);
+    }
+
+    // Polling for submission (Robust Strategy)
+    const startTime = Date.now();
+    let lastRetryTimestamp = 0;
+
+    const interval = setInterval(() => {
+        const now = Date.now();
+        const elapsed = now - startTime;
+
+        let btn = learnedSelectors.submit;
+        if (!btn) {
+            btn = document.querySelector(config.submit) ||
+                  document.querySelector('button[aria-label="Send message"]') ||
+                  document.querySelector('button[data-testid="send-button"]');
+        }
+
+        if (btn && !btn.disabled) {
+            clearInterval(interval);
+            simulateClick(btn);
+            console.log("[AgentAnything] Prompt submitted via button click");
+        } else {
+            // Timeout or Retry Logic
+            if (elapsed > 5000) {
+                clearInterval(interval);
+                // Fallback Enter
+                console.warn("[AgentAnything] Button not ready, forcing Enter key");
+                const eventOpts = { key: 'Enter', code: 'Enter', keyCode: 13, bubbles: true, cancelable: true, view: window, composed: true };
+                inputEl.dispatchEvent(new KeyboardEvent('keydown', eventOpts));
+                inputEl.dispatchEvent(new KeyboardEvent('keypress', eventOpts));
+                inputEl.dispatchEvent(new KeyboardEvent('keyup', eventOpts));
+            } else if (btn && btn.disabled && (elapsed > 2000)) {
+                 // If button disabled for > 2s, retry input event to wake up UI
+                 if (now - lastRetryTimestamp > 1000) { // Retry every > 1s
+                     lastRetryTimestamp = now;
+                     console.log("[AgentAnything] Button disabled, re-dispatching input");
+                     inputEl.dispatchEvent(new Event('input', { bubbles: true }));
+                 }
+            }
+        }
+    }, 100);
+}
+
+
+// --- 3.3 The Input Queue & Debouncer ---
+
+let updateBuffer = [];
+let agentDebounceTimer = null;
+
+function bufferUpdate(text) {
+    updateBuffer.push(text);
+    scheduleInjection();
+}
+
+function scheduleInjection() {
+    if (agentDebounceTimer) clearTimeout(agentDebounceTimer);
+
+    if (isBusy()) {
+        agentDebounceTimer = setTimeout(scheduleInjection, 1000);
+        return;
+    }
+
+    agentDebounceTimer = setTimeout(() => {
+        if (updateBuffer.length === 0) return;
+
+        const combinedText = updateBuffer.join("\n\n");
+        updateBuffer = []; // Clear buffer
+
+        executePrompt(combinedText);
+    }, 500); // 500ms stability window
+}
+
+
+// --- 5. Output Monitoring (Restore Parser) ---
+// Monitors Agent Output to feed back to Service Worker
+
+const sentCommands = new Set();
+let lastMessageText = "";
+
+function startMonitoring() {
+    let lastState = false; // false = idle, true = busy
+
+    const observer = new MutationObserver(() => {
+        // 1. Check Busy State
+        const busy = isBusy();
+        if (busy !== lastState) {
+            lastState = busy;
+            if (!busy) {
+                console.log("Agent became idle.");
+            }
+        }
+
+        // 2. Parse Commands from LAST message only
+        const config = SELECTORS[PROVIDER];
+        if (!config || !config.lastMessage) return;
+
+        const lastMsgEl = document.querySelector(config.lastMessage);
+
+        if (lastMsgEl) {
+            const text = lastMsgEl.innerText;
+            if (text !== lastMessageText) {
+                lastMessageText = text;
+
+                // Check for Session Keyword (Observation Mode)
+                if (observationMode && sessionKeyword && text.includes(sessionKeyword)) {
+                    console.log("[AgentAnything] Session Keyword Detected!");
+                    observationMode = false;
+
+                    // Commit learned selectors
+                    if (potentialSelectors.submit) learnedSelectors.submit = potentialSelectors.submit;
+                    if (potentialSelectors.input) learnedSelectors.input = potentialSelectors.input;
+
+                    if (chrome.runtime?.id) {
+                         chrome.runtime.sendMessage({ action: "INTRO_COMPLETE" }).catch(() => {});
+                    }
+                }
+
+                parseCommands(text);
+            }
+        }
+    });
+
+    observer.observe(document.body, { subtree: true, childList: true, attributes: true, attributeFilter: ['class', 'disabled', 'aria-label'] });
+}
+
+function parseCommands(text) {
+    // XML: <tool_code>...</tool_code>
+    const xmlRegex = /<tool_code>([\s\S]*?)<\/tool_code>/g;
+    let match;
+    while ((match = xmlRegex.exec(text)) !== null) {
+        const raw = match[1].trim();
+        if (!sentCommands.has(raw)) {
+            try {
+                const json = JSON.parse(raw);
+                console.log("Found command:", json);
+                if (chrome.runtime?.id) {
+                    chrome.runtime.sendMessage({ action: "AGENT_COMMAND", payload: json }).catch(() => {});
+                }
+                sentCommands.add(raw);
+            } catch (e) {
+                console.error("Failed to parse command:", e);
+            }
+        }
+    }
+
+    // JSON Code Blocks
+    const jsonRegex = /```json\s*(\{[\s\S]*?\})\s*```/g;
+    while ((match = jsonRegex.exec(text)) !== null) {
+        const raw = match[1].trim();
+        if (!sentCommands.has(raw)) {
+            try {
+                const json = JSON.parse(raw);
+                if (json.tool) {
+                    console.log("Found legacy command:", json);
+                    if (chrome.runtime?.id) {
+                        chrome.runtime.sendMessage({ action: "AGENT_COMMAND", payload: json }).catch(() => {});
+                    }
+                    sentCommands.add(raw);
+                }
+            } catch (e) {
+                console.error("Failed to parse JSON command:", e, raw);
+            }
+        }
+    }
+}
+
+// Start monitoring immediately
+startMonitoring();
+})();
+
+## FILE: ./content/agent_dashboard.js
+(function() {
+// Agent Dashboard - Visual Feedback Panel (V2.1 - Non-Obtrusive)
+console.log("[AgentAnything] Agent Dashboard Loaded");
+
+function ensureDashboard() {
+    let host = document.getElementById('agent-dashboard');
+    if (!host) {
+        host = document.createElement('div');
+        host.id = 'agent-dashboard';
+        host.style.position = 'fixed';
+        host.style.bottom = '10px';
+        host.style.right = '10px';
+        host.style.zIndex = '999999';
+        // Ensure host itself doesn't block clicks outside the panel
+        host.style.pointerEvents = 'none';
+        document.body.appendChild(host);
+
+        const shadow = host.attachShadow({mode: 'closed'});
+        host._shadowRoot = shadow;
+
+        const style = document.createElement('style');
+        style.textContent = `
+            .panel {
+                background: rgba(30, 30, 30, 0.9); /* Slightly transparent */
+                color: #fff;
+                font-family: monospace;
+                padding: 10px;
+                border-radius: 8px;
+                border: 1px solid #444;
+                width: 220px;
+                font-size: 12px;
+                box-shadow: 0 4px 6px rgba(0,0,0,0.3);
+                pointer-events: auto; /* Re-enable clicks for the panel */
+                transition: height 0.3s ease;
+            }
+            .header {
+                display: flex;
+                justify-content: space-between;
+                align-items: center;
+                border-bottom: 1px solid #444;
+                padding-bottom: 5px;
+                margin-bottom: 5px;
+            }
+            .title { font-weight: bold; color: #aaa; }
+            .btn-min {
+                background: transparent;
+                border: 1px solid #555;
+                color: #fff;
+                cursor: pointer;
+                border-radius: 4px;
+                width: 20px;
+                height: 20px;
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                font-size: 14px;
+                line-height: 1;
+            }
+            .btn-min:hover { background: #444; }
+
+            .status { margin-bottom: 5px; display: flex; align-items: center; }
+            .dot {
+                display: inline-block;
+                width: 8px;
+                height: 8px;
+                border-radius: 50%;
+                background: #00ff00;
+                margin-right: 8px;
+            }
+            .queue { color: #888; margin-bottom: 3px; }
+            .last-action {
+                color: #aaa;
+                white-space: nowrap;
+                overflow: hidden;
+                text-overflow: ellipsis;
+                max-width: 200px;
+            }
+
+            .blocker {
+                position: fixed;
+                top: 0; left: 0; width: 100vw; height: 100vh;
+                background: transparent; /* FIX: Fully transparent to avoid obstruction */
+                z-index: 2147483646; /* Just below overlay */
+                pointer-events: auto; /* Capture clicks */
+                display: none;
+                cursor: not-allowed;
+            }
+        `;
+        shadow.appendChild(style);
+
+        // Blocker (Full Screen, Transparent)
+        const blocker = document.createElement('div');
+        blocker.className = 'blocker';
+        blocker.title = "Agent is working... (Interactions Blocked)";
+        shadow.appendChild(blocker);
+
+        // Panel
+        const panel = document.createElement('div');
+        panel.className = 'panel';
+        panel.innerHTML = `
+            <div class="header">
+                <span class="title">Agent Bridge</span>
+                <button class="btn-min" id="minimize-btn" title="Toggle Dashboard">-</button>
+            </div>
+            <div id="panel-content">
+                <div class="status"><span class="dot"></span>Connected</div>
+                <div class="queue">Queue: 0</div>
+                <div class="last-action">Waiting...</div>
+            </div>
+        `;
+        shadow.appendChild(panel);
+
+        // Minimize Logic
+        const btn = panel.querySelector('#minimize-btn');
+        const content = panel.querySelector('#panel-content');
+
+        btn.onclick = (e) => {
+            e.stopPropagation(); // Prevent propagation
+            if (content.style.display === 'none') {
+                content.style.display = 'block';
+                btn.innerText = '-';
+            } else {
+                content.style.display = 'none';
+                btn.innerText = '+';
+            }
+        };
+    }
+    return host._shadowRoot;
+}
+
+// Interaction Blocking
+function blockInteractions(enable) {
+    // We use the capture phase to stop immediate propagation
+    const events = ['click', 'mousedown', 'mouseup', 'keydown', 'keypress', 'keyup', 'submit', 'focus'];
+    const handler = (e) => {
+        // Allow interaction with our dashboard
+        if (e.target.closest && e.target.closest('#agent-dashboard')) return;
+
+        e.stopPropagation();
+        e.preventDefault();
+    };
+
+    if (enable) {
+        events.forEach(ev => window.addEventListener(ev, handler, true));
+    } else {
+        events.forEach(ev => window.removeEventListener(ev, handler, true));
+    }
+}
+
+let isBlocked = false;
+
+function updateDashboard(state) {
+    const root = ensureDashboard();
+    const statusEl = root.querySelector('.status');
+    const queueEl = root.querySelector('.queue');
+    const actionEl = root.querySelector('.last-action');
+    const blocker = root.querySelector('.blocker');
+    const dot = root.querySelector('.dot');
+
+    if (state.status) {
+        // Update Status Text
+        // We reconstruct innerHTML to keep the dot
+        statusEl.innerHTML = '';
+        statusEl.appendChild(dot);
+        statusEl.append(document.createTextNode(state.status));
+
+        let shouldBlock = false;
+
+        // Color Logic
+        if (state.color) {
+            if (state.color === 'green') dot.style.background = '#00ff00';
+            else if (state.color === 'yellow') dot.style.background = '#ffff00';
+            else dot.style.background = '#ff0000';
+        }
+
+        // Blocking Logic
+        if (state.status.includes('Linked') || state.status.includes('Waiting') || state.status === 'Working') {
+            if (state.allowInput) {
+                blocker.style.display = 'none';
+                shouldBlock = false;
+            } else {
+                blocker.style.display = 'block';
+                shouldBlock = true;
+            }
+        } else {
+            blocker.style.display = 'none';
+            shouldBlock = false;
+        }
+
+        if (state.status === 'Idle') {
+             blocker.style.display = 'none';
+             shouldBlock = false;
+        }
+
+        // Apply Blocking
+        if (shouldBlock !== isBlocked) {
+            isBlocked = shouldBlock;
+            blockInteractions(isBlocked);
+        }
+    }
+
+    if (state.queueLength !== undefined) queueEl.innerText = `Queue: ${state.queueLength}`;
+    if (state.lastAction) actionEl.innerText = state.lastAction;
+}
+
+// Hook into Agent Bridge
+if (chrome.runtime?.id) {
+    chrome.runtime.onMessage.addListener((msg) => {
+        if (msg.action === "DASHBOARD_UPDATE") {
+            updateDashboard(msg.payload);
+        }
+    });
+}
+
+})();
+
+## FILE: ./content/network_hook.js
+// Network Interceptor - Injected into MAIN world
+(function() {
+    const XHR = XMLHttpRequest.prototype;
+    const open = XHR.open;
+    const send = XHR.send;
+    const fetch = window.fetch;
+
+    function report(method, url, body) {
+        // Filter: Only same-domain or relevant APIs
+        try {
+            const targetUrl = new URL(url, window.location.href);
+            // Basic filtering to avoid noise (images, css)
+            if (targetUrl.pathname.match(/\.(png|jpg|jpeg|gif|css|js|woff|ttf)$/)) return;
+
+            window.postMessage({
+                source: 'AA_NETWORK_HOOK',
+                payload: {
+                    method,
+                    url: targetUrl.pathname + targetUrl.search, // Relative path + query
+                    body: body ? (typeof body === 'string' ? body : JSON.stringify(body)) : null,
+                    timestamp: Date.now()
+                }
+            }, '*');
+        } catch(e) {}
+    }
+
+    // Hook Fetch
+    window.fetch = async function(...args) {
+        const [resource, config] = args;
+        const method = (config && config.method) || 'GET';
+        const body = (config && config.body);
+        report(method, resource instanceof Request ? resource.url : resource, body);
+        return fetch.apply(window, args);
+    };
+
+    // Hook XHR
+    XHR.open = function(method, url) {
+        this._aa_method = method;
+        this._aa_url = url;
+        return open.apply(this, arguments);
+    };
+
+    XHR.send = function(body) {
+        report(this._aa_method, this._aa_url, body);
+        return send.apply(this, arguments);
+    };
+})();
+
+## FILE: ./content/target_adapter.js
+(function() {
+// Target Adapter - Semantic Parsing (V2.0)
+console.log("[AgentAnything] Target Adapter V2 Loaded");
+
+// --- 1. State ---
+let interactables = {};
+let nextId = 1;
+let lastSnapshot = "";
+let targetDebounceTimer = null;
+let apiCalls = []; // Captured API calls
+
+// --- 2. Overlay (Phase 2) ---
+
+let overlayRef = null;
+
+function showGreenOutline(elementId) {
+    const el = interactables[elementId];
+    if (!el) return;
+
+    // Inject Shadow DOM overlay
+    let host = document.getElementById('agent-overlay');
+
+    if (!host) {
+        host = document.createElement('div');
+        host.id = 'agent-overlay';
+        // Ensure it covers viewport and is on top
+        host.style.position = 'fixed';
+        host.style.top = '0';
+        host.style.left = '0';
+        host.style.width = '100vw';
+        host.style.height = '100vh';
+        host.style.zIndex = '2147483647';
+        host.style.pointerEvents = 'none'; // Crucial!
+        document.body.appendChild(host);
+        overlayRef = host.attachShadow({mode: 'closed'});
+    }
+
+    // Draw green box at element coordinates
+    const rect = el.getBoundingClientRect();
+    const box = document.createElement('div');
+    box.style.position = 'absolute'; // within fixed overlay
+    box.style.left = `${rect.left}px`;
+    box.style.top = `${rect.top}px`;
+    box.style.width = `${rect.width}px`;
+    box.style.height = `${rect.height}px`;
+    box.style.border = '2px solid #00ff00';
+    box.style.zIndex = '999999';
+    box.style.pointerEvents = 'none';
+
+    // Label
+    const label = document.createElement('span');
+    label.innerText = `ID: ${elementId}`;
+    label.style.background = '#00ff00';
+    label.style.color = '#000';
+    label.style.position = 'absolute';
+    label.style.top = '-20px';
+    label.style.left = '0';
+    label.style.fontSize = '12px';
+    label.style.fontWeight = 'bold';
+    label.style.padding = '2px 4px';
+
+    box.appendChild(label);
+    overlayRef.appendChild(box);
+
+    // Remove after 2s
+    setTimeout(() => {
+        if (box && box.parentNode) box.remove();
+    }, 2000);
+}
+
+
+// --- 3. DOM Parsing (Phase 2) ---
+
+function redactPII(text) {
+    if (!text) return "";
+    text = text.replace(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g, '[EMAIL]');
+    // Simple US Phone
+    text = text.replace(/\b\d{3}[-.]?\d{3}[-.]?\d{4}\b/g, '[PHONE]');
+    // Simple CC (16 digits)
+    text = text.replace(/\b(?:\d{4}[- ]?){3}\d{4}\b/g, '[CC]');
+    return text;
+}
+
+function parseDOM() {
+    interactables = {};
+    nextId = 1; // Reset IDs for fresh snapshot
+
+    let output = [];
+    let elementIds = [];
+
+    // Use TreeWalker (V2 Requirement)
+    const walker = document.createTreeWalker(
+        document.body,
+        NodeFilter.SHOW_ELEMENT,
+        {
+            acceptNode: (node) => {
+                const tag = node.tagName.toLowerCase();
+                // "ignoring <script>, <style>, and hidden elements"
+                if (['script', 'style', 'noscript', 'meta', 'link', 'svg', 'path'].includes(tag)) return NodeFilter.FILTER_REJECT;
+
+                const style = window.getComputedStyle(node);
+                if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') return NodeFilter.FILTER_REJECT;
+
+                return NodeFilter.FILTER_ACCEPT;
+            }
+        }
+    );
+
+    while(walker.nextNode()) {
+        const el = walker.currentNode;
+        const tag = el.tagName.toLowerCase();
+
+        const isInteractive = (
+            tag === 'a' ||
+            tag === 'button' ||
+            tag === 'input' ||
+            tag === 'textarea' ||
+            tag === 'select' ||
+            el.getAttribute('role') === 'button' ||
+            el.getAttribute('contenteditable') === 'true' ||
+            el.onclick
+        );
+
+        if (isInteractive) {
+            const id = nextId++;
+            interactables[id] = el;
+            elementIds.push(id);
+            el.dataset.agentId = id;
+
+            let xml = `<${tag} id="${id}"`;
+
+            if (el.value) xml += ` value="${redactPII(el.value)}"`;
+            if (el.placeholder) xml += ` placeholder="${redactPII(el.placeholder)}"`;
+
+            let labelText = el.getAttribute('aria-label') || el.getAttribute('name');
+            if (!labelText && el.id) {
+                const labelEl = document.querySelector(`label[for="${el.id}"]`);
+                if (labelEl) labelText = labelEl.innerText;
+            }
+            if (labelText) xml += ` label="${redactPII(labelText)}"`;
+
+            if (tag === 'a' && el.href) {
+                try {
+                    const url = new URL(el.href);
+                    xml += ` href="${url.origin}${url.pathname}[REDACTED_QUERY]"`;
+                } catch(e) {
+                     xml += ` href="[INVALID_URL]"`;
+                }
+            }
+
+            let innerText = "";
+            if (tag !== 'input' && tag !== 'textarea' && tag !== 'select') {
+                innerText = el.innerText.trim();
+                innerText = redactPII(innerText).substring(0, 50); // Truncate
+            }
+
+            xml += `>`;
+
+            if (innerText) {
+                xml += `${innerText}`;
+            }
+
+            xml += `</${tag}>`;
+
+            output.push(xml);
+        }
+    }
+
+    return { snapshot: output.join("\n"), elementIds: elementIds };
+}
+
+
+// --- 4. Network Monitoring (V2.4) ---
+
+function injectNetworkHook() {
+    const script = document.createElement('script');
+    script.src = chrome.runtime.getURL('content/network_hook.js');
+    script.onload = function() { this.remove(); };
+    (document.head || document.documentElement).appendChild(script);
+
+    window.addEventListener('message', (event) => {
+        if (event.source !== window || !event.data || event.data.source !== 'AA_NETWORK_HOOK') return;
+        const call = event.data.payload;
+        // Buffer latest 5 calls
+        apiCalls.unshift(call);
+        if (apiCalls.length > 5) apiCalls.pop();
+        checkChanges(); // Trigger update immediately on API call
+    });
+}
+
+
+// --- 5. Diffing & Updates (Phase 2) ---
+
+function checkChanges() {
+    const result = parseDOM();
+    let currentSnapshot = result.snapshot;
+
+    // Append API Calls (V2.4)
+    if (apiCalls.length > 0) {
+        currentSnapshot += "\n\n<api_activity>\n";
+        apiCalls.forEach(api => {
+            currentSnapshot += `  <call method="${api.method}" url="${api.url}">\n    ${redactPII(api.body || '')}\n  </call>\n`;
+        });
+        currentSnapshot += "</api_activity>";
+    }
+
+    if (currentSnapshot !== lastSnapshot) {
+        lastSnapshot = currentSnapshot;
+
+        const payload = `[Target Update]\nURL: ${window.location.href}\nInteractive Elements:\n${currentSnapshot}`;
+
+        if (chrome.runtime?.id) {
+            chrome.runtime.sendMessage({
+                action: "TARGET_UPDATE",
+                payload: payload,
+                elementIds: result.elementIds
+            }).catch(() => {});
+        }
+    }
+}
+
+// Debounce updates
+const observer = new MutationObserver(() => {
+    if (targetDebounceTimer) clearTimeout(targetDebounceTimer);
+    targetDebounceTimer = setTimeout(checkChanges, 500); // 500ms debounce
+});
+
+
+// --- 6. User Interrupt Detection (V2.2) ---
+
+function handleUserInteraction() {
+    if (this._interruptTimer) return;
+    this._interruptTimer = setTimeout(() => { this._interruptTimer = null; }, 1000);
+    if (chrome.runtime?.id) {
+        chrome.runtime.sendMessage({ action: "USER_INTERRUPT" }).catch(() => {});
+    }
+}
+
+window.addEventListener('mousedown', handleUserInteraction, true);
+window.addEventListener('keydown', handleUserInteraction, true);
+
+
+// --- 7. Message Listener ---
+
+chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+    if (msg.action === "INIT_TARGET") {
+        console.log("Target Initialized");
+        injectNetworkHook(); // Inject hook
+        checkChanges();
+        observer.observe(document.body, { subtree: true, childList: true, attributes: true, characterData: true });
+    }
+
+    if (msg.action === "GET_COORDINATES") {
+        const id = parseInt(msg.id);
+        const el = interactables[id];
+
+        if (el) {
+            const rect = el.getBoundingClientRect();
+            showGreenOutline(id);
+            sendResponse({
+                x: rect.left + (rect.width / 2),
+                y: rect.top + (rect.height / 2),
+                found: true
+            });
+        } else {
+            sendResponse({ found: false });
+        }
+        return true;
+    }
+});
+})();

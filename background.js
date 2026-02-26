@@ -1,23 +1,37 @@
-// Service Worker V2.0 (Store-First Architecture)
-console.log("[AgentAnything] Background Service Worker V2 Loaded");
+// Service Worker V2.1 (Tools + Tab Limit)
+console.log("[AgentAnything] Background Service Worker V2.1 Loaded");
 
 // --- Configuration (Options) ---
-let CONFIG = { redactPII: true, debugMode: false, privacyAccepted: false };
+// maxTabs: how many target tabs the AI may control simultaneously (user-configurable)
+let CONFIG = { redactPII: true, debugMode: false, privacyAccepted: false, maxTabs: 3 };
 
 async function loadConfig() {
-    const items = await chrome.storage.sync.get({ redactPII: true, debugMode: false, privacyAccepted: false });
+    const items = await chrome.storage.sync.get({
+        redactPII: true,
+        debugMode: false,
+        privacyAccepted: false,
+        maxTabs: 3
+    });
     CONFIG = items;
     log("[System] Config Loaded:", CONFIG);
+}
+
+// --- Saved Tools ---
+async function getSavedTools() {
+    const data = await chrome.storage.sync.get({ savedTools: [] });
+    return Array.isArray(data.savedTools) ? data.savedTools : [];
 }
 
 function log(msg, ...args) {
     if (CONFIG.debugMode) console.log(msg, ...args);
 }
 
+// FIX: setAccessLevel must run on EVERY service worker start, not just onInstalled.
+// Session storage is cleared on browser restart, so this needs to be re-applied.
+chrome.storage.session.setAccessLevel({ accessLevel: 'TRUSTED_AND_UNTRUSTED_CONTEXTS' }).catch(() => {});
+
 chrome.runtime.onStartup.addListener(loadConfig);
 chrome.runtime.onInstalled.addListener(() => {
-    chrome.storage.session.setAccessLevel({ accessLevel: 'TRUSTED_AND_UNTRUSTED_CONTEXTS' });
-
     // Onboarding
     chrome.storage.sync.get(['privacyAccepted'], (res) => {
         if (!res.privacyAccepted) {
@@ -34,6 +48,7 @@ chrome.storage.onChanged.addListener((changes, area) => {
         if (changes.redactPII) CONFIG.redactPII = changes.redactPII.newValue;
         if (changes.debugMode) CONFIG.debugMode = changes.debugMode.newValue;
         if (changes.privacyAccepted) CONFIG.privacyAccepted = changes.privacyAccepted.newValue;
+        if (changes.maxTabs) CONFIG.maxTabs = changes.maxTabs.newValue;
         log("[System] Config Updated:", CONFIG);
     }
 });
@@ -42,7 +57,7 @@ chrome.storage.onChanged.addListener((changes, area) => {
 // --- 1. State Persistence ---
 const DEFAULT_STATE = {
     agentTabId: null,
-    agentUrl: null, // Store Agent URL for recovery
+    agentUrl: null,
     targetTabs: [],
     commandQueue: [],
     isAgentBusy: false,
@@ -74,7 +89,7 @@ async function getState() {
 
 async function updateState(updates) {
     await chrome.storage.local.set(updates);
-    broadcastStatus(updates); // Auto-broadcast on state update
+    broadcastStatus();
 }
 
 // --- 2. Keep-Alive ---
@@ -104,6 +119,25 @@ chrome.runtime.onStartup.addListener(startKeepAlive);
 startKeepAlive();
 
 // --- 3. Command Processing ---
+
+// Tracks tabs opened programmatically by the AI that haven't loaded yet.
+// When chrome.tabs.onUpdated fires 'complete' for these, we auto-init them as targets.
+const pendingTargetAssignments = new Map();
+
+chrome.tabs.onUpdated.addListener(async (tabId, changeInfo) => {
+    if (changeInfo.status !== 'complete') return;
+    if (!pendingTargetAssignments.has(tabId)) return;
+    pendingTargetAssignments.delete(tabId);
+
+    // Give document_idle content scripts a moment after 'complete'
+    setTimeout(async () => {
+        const state = await getState();
+        if (state.targetTabs.some(t => t.tabId === tabId)) {
+            await sendMessageToTab(tabId, { action: "INIT_TARGET", config: CONFIG });
+            log(`[System] Auto-initialized pending target tab ${tabId}`);
+        }
+    }, 600);
+});
 
 chrome.storage.onChanged.addListener((changes, area) => {
     if (area === 'local' && changes.commandQueue) {
@@ -147,8 +181,6 @@ async function processQueue(queue) {
                     action: "BUFFER_UPDATE",
                     text: safePayload
                 });
-
-                // Update timestamp safe
                 await withLock(async () => { await updateState({ lastActionTimestamp: 0 }); });
             }
         }
@@ -189,6 +221,57 @@ async function processQueue(queue) {
              }
         }
 
+        // Open a URL in a new background tab and assign it as a target.
+        // Enforces CONFIG.maxTabs by releasing the oldest target assignment if at limit.
+        if (item.type === 'OPEN_TAB') {
+            const { url } = item.payload;
+            let freshState = await getState();
+            const maxTabs = CONFIG.maxTabs || 3;
+            let updatedTargets = [...freshState.targetTabs];
+
+            if (updatedTargets.length >= maxTabs) {
+                // Release oldest assignment (FIFO). We don't close the actual browser tab —
+                // the user may want it. We just stop controlling it.
+                const released = updatedTargets.shift();
+                log(`[System] Tab limit (${maxTabs}) reached. Releasing tab ${released.tabId} (${released.url}).`);
+                sendMessageToTab(released.tabId, {
+                    action: "DASHBOARD_UPDATE",
+                    payload: { status: "Idle", color: "red", queueLength: 0, lastAction: "Released by agent", isAgentTab: false }
+                });
+            }
+
+            try {
+                const newTab = await chrome.tabs.create({ url, active: false });
+                updatedTargets.push({ tabId: newTab.id, url });
+                pendingTargetAssignments.set(newTab.id, true);
+                await updateState({ targetTabs: updatedTargets });
+                log(`[System] Opened new target tab ${newTab.id}: ${url}`);
+            } catch(e) {
+                console.error("[System] Failed to open tab:", e);
+                await enqueue({ type: 'UPDATE_AGENT', payload: `System Error: Failed to open URL "${url}". ${e.message}` });
+            }
+        }
+
+        // Resolve a named tool to its URL, then re-enqueue as OPEN_TAB.
+        if (item.type === 'OPEN_TOOL') {
+            const { name } = item.payload;
+            const tools = await getSavedTools();
+            const tool = tools.find(t => t.name.toLowerCase() === name.toLowerCase());
+
+            if (tool) {
+                log(`[System] Resolving tool "${name}" → ${tool.url}`);
+                await enqueue({ type: 'OPEN_TAB', payload: { url: tool.url } });
+            } else {
+                const available = tools.length > 0
+                    ? tools.map(t => `"${t.name}"`).join(', ')
+                    : 'none saved yet';
+                await enqueue({
+                    type: 'UPDATE_AGENT',
+                    payload: `System Error: Tool "${name}" not found. Available tools: ${available}`
+                });
+            }
+        }
+
         // Safe Removal
         await withLock(async () => {
             const s = await getState();
@@ -216,8 +299,6 @@ async function checkTimeout() {
 
 // --- 4. Execution Engine ---
 
-// --- 4. Execution Engine ---
-
 async function executeBackgroundClick(tabId, x, y) {
     const target = { tabId };
     try {
@@ -231,7 +312,7 @@ async function executeBackgroundClick(tabId, x, y) {
     } catch (e) {
         log(`Debugger click failed on ${tabId}: ${e.message}`);
     } finally {
-        try { await chrome.debugger.detach(target); } catch(e) { console.error(e); }
+        try { await chrome.debugger.detach(target); } catch(e) { /* already detached */ }
     }
 }
 
@@ -239,38 +320,53 @@ async function executeBackgroundType(tabId, x, y, value) {
     const target = { tabId };
     try {
         await chrome.debugger.attach(target, "1.3");
+        // Click to focus element
         await chrome.debugger.sendCommand(target, "Input.dispatchMouseEvent", {
             type: "mousePressed", x, y, button: "left", clickCount: 1
         });
         await chrome.debugger.sendCommand(target, "Input.dispatchMouseEvent", {
             type: "mouseReleased", x, y, button: "left", clickCount: 1
         });
-        
+        // Type each character
         for (const char of value) {
-             await chrome.debugger.sendCommand(target, "Input.dispatchKeyEvent", { type: "keyDown", text: char });
-             await chrome.debugger.sendCommand(target, "Input.dispatchKeyEvent", { type: "keyUp" });
+            // keyDown + char event is the correct CDP pattern for text input
+            await chrome.debugger.sendCommand(target, "Input.dispatchKeyEvent", {
+                type: "keyDown",
+                key: char,
+                text: char,
+                unmodifiedText: char
+            });
+            await chrome.debugger.sendCommand(target, "Input.dispatchKeyEvent", {
+                type: "char",
+                key: char,
+                text: char,
+                unmodifiedText: char
+            });
+            await chrome.debugger.sendCommand(target, "Input.dispatchKeyEvent", {
+                type: "keyUp",
+                key: char
+            });
         }
     } catch (e) {
         log(`Debugger type failed on ${tabId}: ${e.message}`);
     } finally {
-        try { await chrome.debugger.detach(target); } catch(e) { console.error(e); }
+        try { await chrome.debugger.detach(target); } catch(e) { /* already detached */ }
     }
 }
 
 
 // --- 5. Message Routing ---
 
-// sendMessageToTab was declared twice in the previous version. Removed the second declaration.
 async function sendMessageToTab(tabId, message) {
     try {
         return await chrome.tabs.sendMessage(tabId, message);
     } catch (e) { return null; }
 }
 
-async function broadcastStatus(changes) {
+async function broadcastStatus() {
     const state = await getState();
     let status = "Idle";
-    let color = "red"; // Default to error/unknown
+    let color = "red";
     let allowInput = false;
 
     if (state.observationMode) {
@@ -294,15 +390,27 @@ async function broadcastStatus(changes) {
     }
 
     const payload = {
-        status: status,
-        color: color,
+        status,
+        color,
+        isAgentTab: false, // will be overridden per-tab below
         queueLength: state.commandQueue.length,
         lastAction: state.lastActionTimestamp ? "Active" : "Waiting...",
-        allowInput: allowInput
+        allowInput
     };
 
-    if (state.agentTabId) sendMessageToTab(state.agentTabId, { action: "DASHBOARD_UPDATE", payload });
-    state.targetTabs.forEach(t => sendMessageToTab(t.tabId, { action: "DASHBOARD_UPDATE", payload }));
+    // FIX: Tag agent vs target so dashboard can choose whether to block
+    if (state.agentTabId) {
+        sendMessageToTab(state.agentTabId, {
+            action: "DASHBOARD_UPDATE",
+            payload: { ...payload, isAgentTab: true }
+        });
+    }
+    state.targetTabs.forEach(t => {
+        sendMessageToTab(t.tabId, {
+            action: "DASHBOARD_UPDATE",
+            payload: { ...payload, isAgentTab: false }
+        });
+    });
 }
 
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
@@ -320,33 +428,37 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
         if (msg.action === "ASSIGN_ROLE") {
             await withLock(async () => {
-                // Refresh state inside lock
                 state = await getState();
                 const role = msg.role;
                 const tid = msg.tabId;
 
+                // FIX: sender.tab is null when called from popup (not a content script).
+                // Use chrome.tabs.get to fetch actual tab URL.
+                let tabUrl = "";
+                try {
+                    const tabInfo = await chrome.tabs.get(tid);
+                    tabUrl = tabInfo.url || "";
+                } catch(e) {
+                    console.error("[System] Could not get tab info:", e);
+                    return;
+                }
+
                 if (role === 'AGENT') {
-                    // Prevent duplicate init
                     if (state.agentTabId === tid) return;
 
                     const targets = state.targetTabs.filter(t => t.tabId !== tid);
 
-                    // Generate unique session keyword
                     const safeGetHostname = (u) => {
                         try { return new URL(u).hostname; } catch (e) { return "unknown"; }
                     };
                     const targetDomain = targets.length > 0 ? safeGetHostname(targets[0].url) : "unknown";
-                    const agentDomain = sender.tab?.url ? safeGetHostname(sender.tab.url) : "unknown";
+                    const agentDomain = safeGetHostname(tabUrl);
                     const sessionKeyword = `[END:${targetDomain}-${agentDomain}-${Date.now()}]`;
-
-                    const taskDescription = msg.task ? `\n\nYOUR GOAL: ${msg.task}` : "";
-                    const initialPrompt = `You are an autonomous agent. I will feed you the state of another tab. Output commands like \`interact\` to interact.${taskDescription}\n\nIMPORTANT: End EVERY response with this exact keyword: ${sessionKeyword}`;
 
                     await updateState({
                         agentTabId: tid,
-                        agentUrl: sender.tab?.url || "", // Capture Agent URL
+                        agentUrl: tabUrl,
                         targetTabs: targets,
-                        // commandQueue: [], // Preserve existing queue (e.g. Target Maps)
                         elementMap: {},
                         lastActionTimestamp: 0,
                         observationMode: true,
@@ -355,18 +467,17 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
                     sendMessageToTab(tid, { action: "INIT_AGENT", keyword: sessionKeyword });
 
-                    // Immediate execution of first prompt (Bypass Queue)
+                    const initialPrompt = await buildInitialPrompt(msg.task, sessionKeyword);
                     const safePayload = `<browsing_context>\n${initialPrompt}\n</browsing_context>`;
                     setTimeout(() => {
                         sendMessageToTab(tid, { action: "EXECUTE_PROMPT", text: safePayload });
-                    }, 500); // Small delay to ensure INIT is processed
+                    }, 500);
 
                 } else {
-                    // Check if already assigned
                     if (state.targetTabs.some(t => t.tabId === tid)) return;
 
                     let targets = [...state.targetTabs];
-                    targets.push({ tabId: tid, url: sender.tab?.url || "" });
+                    targets.push({ tabId: tid, url: tabUrl }); // FIX: was sender.tab?.url
 
                     const agent = state.agentTabId === tid ? null : state.agentTabId;
                     await updateState({ targetTabs: targets, agentTabId: agent });
@@ -385,19 +496,56 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         }
 
         if (msg.action === "AGENT_COMMAND") {
-            await enqueue({ type: 'CLICK_TARGET', payload: msg.payload });
+            const cmd = msg.payload;
+            // Route based on the action field in the command JSON
+            if (cmd.action === 'open_tab' && cmd.url) {
+                await enqueue({ type: 'OPEN_TAB', payload: { url: cmd.url } });
+            } else if (cmd.action === 'open_tool' && cmd.name) {
+                await enqueue({ type: 'OPEN_TOOL', payload: { name: cmd.name } });
+            } else {
+                // click / type → target interaction
+                await enqueue({ type: 'CLICK_TARGET', payload: cmd });
+            }
         }
 
-        // Handle Intro Completion
+        // Saves a site as a named, reusable tool the AI can invoke by name.
+        if (msg.action === "SAVE_TOOL") {
+            const { name, url } = msg;
+            if (!name || !url) return;
+            const existing = await getSavedTools();
+            // Replace if same name already saved (case-insensitive)
+            const filtered = existing.filter(t => t.name.toLowerCase() !== name.toLowerCase());
+            const tool = { id: Date.now().toString(), name, url };
+            await chrome.storage.sync.set({ savedTools: [...filtered, tool] });
+            log(`[System] Saved tool: "${name}" → ${url}`);
+        }
+
+        if (msg.action === "DELETE_TOOL") {
+            const { id } = msg;
+            if (!id) return;
+            const existing = await getSavedTools();
+            await chrome.storage.sync.set({ savedTools: existing.filter(t => t.id !== id) });
+            log(`[System] Deleted tool id: ${id}`);
+        }
+
+        // FIX: Added missing REMOTE_INJECT handler. This powers the "Send Command" button in the popup.
+        if (msg.action === "REMOTE_INJECT") {
+            state = await getState();
+            if (state.agentTabId && msg.payload) {
+                log("[System] Remote inject:", msg.payload);
+                await sendMessageToTab(state.agentTabId, {
+                    action: "EXECUTE_PROMPT",
+                    text: msg.payload
+                });
+            }
+        }
+
         if (msg.action === "INTRO_COMPLETE") {
             log("[System] Intro Complete. Exiting Observation Mode.");
             await withLock(async () => {
                 const s = await getState();
                 if (s.observationMode) {
                     await updateState({ observationMode: false });
-                    // If we have items in the queue (e.g., target map), they will be processed naturally
-                    // by the next queue check or update trigger. Since we just finished intro,
-                    // we might want to force a queue check if queue > 0.
                     if (s.commandQueue.length > 0) {
                         processQueue(s.commandQueue);
                     }
@@ -405,19 +553,17 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
             });
         }
 
-        // Handle User Interruption
         if (msg.action === "USER_INTERRUPT") {
-            log("[System] User Interruption Detected. Ignoring.");
+            log("[System] User Interruption Detected.");
+            // Currently a no-op; uncomment to clear queue on user interaction:
             // await updateState({ commandQueue: [], lastActionTimestamp: 0 });
-            // await enqueue({ type: 'UPDATE_AGENT', payload: "System: User manually interacted with the page. Queue cleared. Please re-assess state." });
         }
 
         if (msg.action === "DISENGAGE_ALL") {
             log("[System] Disengaging all tabs.");
             await withLock(async () => {
                 const s = await getState();
-                // Notify before clearing
-                const payload = { status: "Idle", queueLength: 0, lastAction: "Disengaged" };
+                const payload = { status: "Idle", queueLength: 0, lastAction: "Disengaged", isAgentTab: false };
                 if (s.agentTabId) sendMessageToTab(s.agentTabId, { action: "DASHBOARD_UPDATE", payload });
                 s.targetTabs.forEach(t => sendMessageToTab(t.tabId, { action: "DASHBOARD_UPDATE", payload }));
 
@@ -437,38 +583,21 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     return true;
 });
 
-// Tab Recovery Logic
+// Tab cleanup (without aggressive auto-recovery)
 chrome.tabs.onRemoved.addListener(async (tabId) => {
     await withLock(async () => {
         const state = await getState();
 
-        // Recover Agent
-        if (state.agentTabId === tabId && state.agentUrl) {
-            log("[System] Agent tab closed. Recovering...");
-            try {
-                const newTab = await chrome.tabs.create({ url: state.agentUrl, active: false });
-                await updateState({ agentTabId: newTab.id });
-                // We rely on content script sending HELLO or user re-assigning,
-                // but actually we should try to re-init if possible.
-                // However, without content script ready, sendMessage fails.
-                // Best we can do is update ID so if it reloads it might reconnect if we had persistent checks.
-                // But simplified: Just open it. User might need to re-assign if content script doesn't auto-handshake.
-            } catch (e) { console.error("Agent recovery failed:", e); }
+        if (state.agentTabId === tabId) {
+            log("[System] Agent tab closed. Clearing agent assignment.");
+            await updateState({ agentTabId: null, agentUrl: null, observationMode: false });
         }
 
-        // Recover Targets
         const targetIndex = state.targetTabs.findIndex(t => t.tabId === tabId);
         if (targetIndex !== -1) {
-            const target = state.targetTabs[targetIndex];
-            if (target.url) {
-                log(`[System] Target tab ${tabId} closed. Recovering...`);
-                try {
-                    const newTab = await chrome.tabs.create({ url: target.url, active: false });
-                    const newTargets = [...state.targetTabs];
-                    newTargets[targetIndex] = { ...target, tabId: newTab.id };
-                    await updateState({ targetTabs: newTargets });
-                } catch (e) { console.error("Target recovery failed:", e); }
-            }
+            const newTargets = state.targetTabs.filter(t => t.tabId !== tabId);
+            log(`[System] Target tab ${tabId} removed.`);
+            await updateState({ targetTabs: newTargets });
         }
     });
 });
@@ -479,4 +608,38 @@ async function enqueue(item) {
         const q = [...state.commandQueue, item];
         await updateState({ commandQueue: q });
     });
+}
+
+// Builds the system prompt injected into the agent AI at session start.
+// Includes the full command reference, available saved tools, and tab constraints.
+async function buildInitialPrompt(task, sessionKeyword) {
+    const tools = await getSavedTools();
+    const maxTabs = CONFIG.maxTabs || 3;
+
+    const toolsSection = tools.length > 0
+        ? `═══ AVAILABLE TOOLS ═══\n${tools.map(t => `  • ${t.name.padEnd(20)} → ${t.url}`).join('\n')}\n\n`
+        : '';
+
+    const taskSection = task
+        ? `═══ YOUR GOAL ═══\n${task}\n\n`
+        : '';
+
+    return `You are an autonomous web agent. An extension feeds you live browser state and executes your commands.
+
+═══ COMMAND REFERENCE ═══
+Output ONE command at a time as JSON inside <tool_code> tags:
+
+  Click an element:       <tool_code>{"action": "click", "id": <number>}</tool_code>
+  Type into a field:      <tool_code>{"action": "type", "id": <number>, "value": "<text>"}</tool_code>
+  Open a URL (new tab):   <tool_code>{"action": "open_tab", "url": "<full URL>"}</tool_code>
+  Open a saved Tool:      <tool_code>{"action": "open_tool", "name": "<exact tool name>"}</tool_code>
+
+${toolsSection}═══ CONSTRAINTS ═══
+• You may control up to ${maxTabs} tab${maxTabs !== 1 ? 's' : ''} simultaneously.
+• When you open a new tab at the limit, the oldest tab is automatically released.
+• After every action you will receive updated DOM snapshots of all active target tabs.
+• Interactive elements in each snapshot are numbered — use those numbers as "id" values.
+• Wait for a DOM update before issuing the next command; do not chain multiple commands at once.
+
+${taskSection}IMPORTANT: End EVERY response with this exact keyword: ${sessionKeyword}`;
 }

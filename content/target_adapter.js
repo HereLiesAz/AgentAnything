@@ -1,15 +1,16 @@
 (function() {
-// Target Adapter - Semantic Parsing (V2.0)
-console.log("[AgentAnything] Target Adapter V2 Loaded");
+// Target Adapter - Semantic Parsing (V2.1)
+// FIXES: Validates postMessage origin from network_hook to prevent spoofing
+console.log("[AgentAnything] Target Adapter V2.1 Loaded");
 
 // --- 1. State ---
 let interactables = {};
 let nextId = 1;
 let lastSnapshot = "";
 let targetDebounceTimer = null;
-let apiCalls = []; // Captured API calls
+let apiCalls = [];
 
-// --- 2. Overlay (Phase 2) ---
+// --- 2. Overlay ---
 
 let overlayRef = null;
 
@@ -17,39 +18,34 @@ function showGreenOutline(elementId) {
     const el = interactables[elementId];
     if (!el) return;
 
-    // Inject Shadow DOM overlay
     let host = document.getElementById('agent-overlay');
 
     if (!host) {
         host = document.createElement('div');
         host.id = 'agent-overlay';
-        // Ensure it covers viewport and is on top
         host.style.position = 'fixed';
         host.style.top = '0';
         host.style.left = '0';
         host.style.width = '100vw';
         host.style.height = '100vh';
         host.style.zIndex = '2147483647';
-        host.style.pointerEvents = 'none'; // Crucial!
+        host.style.pointerEvents = 'none';
         document.body.appendChild(host);
         overlayRef = host.attachShadow({mode: 'closed'});
     }
 
-    // Draw green box at element coordinates
     const rect = el.getBoundingClientRect();
     const box = document.createElement('div');
-    box.style.position = 'absolute'; // within fixed overlay
+    box.style.position = 'absolute';
     box.style.left = `${rect.left}px`;
     box.style.top = `${rect.top}px`;
     box.style.width = `${rect.width}px`;
     box.style.height = `${rect.height}px`;
     box.style.border = '2px solid #00ff00';
-    box.style.zIndex = '999999';
     box.style.pointerEvents = 'none';
 
-    // Label
     const label = document.createElement('span');
-    label.innerText = `ID: ${elementId}`;
+    label.textContent = `ID: ${elementId}`; // FIX: was innerText, textContent is safer
     label.style.background = '#00ff00';
     label.style.color = '#000';
     label.style.position = 'absolute';
@@ -58,45 +54,43 @@ function showGreenOutline(elementId) {
     label.style.fontSize = '12px';
     label.style.fontWeight = 'bold';
     label.style.padding = '2px 4px';
+    label.style.pointerEvents = 'none';
 
     box.appendChild(label);
     overlayRef.appendChild(box);
 
-    // Remove after 2s
     setTimeout(() => {
         if (box && box.parentNode) box.remove();
     }, 2000);
 }
 
 
-// --- 3. DOM Parsing (Phase 2) ---
+// --- 3. DOM Parsing ---
 
 function redactPII(text) {
     if (!text) return "";
     text = text.replace(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g, '[EMAIL]');
-    // Simple US Phone
     text = text.replace(/\b\d{3}[-.]?\d{3}[-.]?\d{4}\b/g, '[PHONE]');
-    // Simple CC (16 digits)
     text = text.replace(/\b(?:\d{4}[- ]?){3}\d{4}\b/g, '[CC]');
     return text;
 }
 
 function parseDOM() {
     interactables = {};
-    nextId = 1; // Reset IDs for fresh snapshot
+    nextId = 1;
 
     let output = [];
     let elementIds = [];
 
-    // Use TreeWalker (V2 Requirement)
     const walker = document.createTreeWalker(
         document.body,
         NodeFilter.SHOW_ELEMENT,
         {
             acceptNode: (node) => {
                 const tag = node.tagName.toLowerCase();
-                // "ignoring <script>, <style>, and hidden elements"
                 if (['script', 'style', 'noscript', 'meta', 'link', 'svg', 'path'].includes(tag)) return NodeFilter.FILTER_REJECT;
+                // Skip our own injected elements
+                if (node.id === 'agent-dashboard' || node.id === 'agent-overlay') return NodeFilter.FILTER_REJECT;
 
                 const style = window.getComputedStyle(node);
                 if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') return NodeFilter.FILTER_REJECT;
@@ -117,6 +111,7 @@ function parseDOM() {
             tag === 'textarea' ||
             tag === 'select' ||
             el.getAttribute('role') === 'button' ||
+            el.getAttribute('role') === 'link' ||
             el.getAttribute('contenteditable') === 'true' ||
             el.onclick
         );
@@ -129,12 +124,12 @@ function parseDOM() {
 
             let xml = `<${tag} id="${id}"`;
 
-            if (el.value) xml += ` value="${redactPII(el.value)}"`;
+            if (el.value) xml += ` value="${redactPII(String(el.value))}"`;
             if (el.placeholder) xml += ` placeholder="${redactPII(el.placeholder)}"`;
 
-            let labelText = el.getAttribute('aria-label') || el.getAttribute('name');
+            let labelText = el.getAttribute('aria-label') || el.getAttribute('name') || el.getAttribute('title');
             if (!labelText && el.id) {
-                const labelEl = document.querySelector(`label[for="${el.id}"]`);
+                const labelEl = document.querySelector(`label[for="${CSS.escape(el.id)}"]`);
                 if (labelEl) labelText = labelEl.innerText;
             }
             if (labelText) xml += ` label="${redactPII(labelText)}"`;
@@ -142,35 +137,36 @@ function parseDOM() {
             if (tag === 'a' && el.href) {
                 try {
                     const url = new URL(el.href);
-                    xml += ` href="${url.origin}${url.pathname}[REDACTED_QUERY]"`;
+                    xml += ` href="${url.origin}${url.pathname}"`;
                 } catch(e) {
                      xml += ` href="[INVALID_URL]"`;
                 }
             }
 
+            if (tag === 'input') {
+                const type = el.type || 'text';
+                xml += ` type="${type}"`;
+                if (el.disabled) xml += ` disabled="true"`;
+            }
+
             let innerText = "";
             if (tag !== 'input' && tag !== 'textarea' && tag !== 'select') {
-                innerText = el.innerText.trim();
-                innerText = redactPII(innerText).substring(0, 50); // Truncate
+                innerText = redactPII(el.innerText.trim()).substring(0, 80);
             }
 
             xml += `>`;
-
-            if (innerText) {
-                xml += `${innerText}`;
-            }
-
+            if (innerText) xml += innerText;
             xml += `</${tag}>`;
 
             output.push(xml);
         }
     }
 
-    return { snapshot: output.join("\n"), elementIds: elementIds };
+    return { snapshot: output.join("\n"), elementIds };
 }
 
 
-// --- 4. Network Monitoring (V2.4) ---
+// --- 4. Network Monitoring ---
 
 function injectNetworkHook() {
     const script = document.createElement('script');
@@ -179,23 +175,26 @@ function injectNetworkHook() {
     (document.head || document.documentElement).appendChild(script);
 
     window.addEventListener('message', (event) => {
-        if (event.source !== window || !event.data || event.data.source !== 'AA_NETWORK_HOOK') return;
+        // FIX: Validate origin to prevent fake AA_NETWORK_HOOK messages from being injected
+        // by malicious page scripts. Only accept messages from the same origin.
+        if (event.source !== window) return;
+        if (event.origin !== window.location.origin) return;
+        if (!event.data || event.data.source !== 'AA_NETWORK_HOOK') return;
+
         const call = event.data.payload;
-        // Buffer latest 5 calls
         apiCalls.unshift(call);
         if (apiCalls.length > 5) apiCalls.pop();
-        checkChanges(); // Trigger update immediately on API call
+        checkChanges();
     });
 }
 
 
-// --- 5. Diffing & Updates (Phase 2) ---
+// --- 5. Diffing & Updates ---
 
 function checkChanges() {
     const result = parseDOM();
     let currentSnapshot = result.snapshot;
 
-    // Append API Calls (V2.4)
     if (apiCalls.length > 0) {
         currentSnapshot += "\n\n<api_activity>\n";
         apiCalls.forEach(api => {
@@ -219,14 +218,13 @@ function checkChanges() {
     }
 }
 
-// Debounce updates
 const observer = new MutationObserver(() => {
     if (targetDebounceTimer) clearTimeout(targetDebounceTimer);
-    targetDebounceTimer = setTimeout(checkChanges, 500); // 500ms debounce
+    targetDebounceTimer = setTimeout(checkChanges, 500);
 });
 
 
-// --- 6. User Interrupt Detection (V2.2) ---
+// --- 6. User Interrupt Detection ---
 
 function handleUserInteraction() {
     if (this._interruptTimer) return;
@@ -244,8 +242,8 @@ window.addEventListener('keydown', handleUserInteraction, true);
 
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     if (msg.action === "INIT_TARGET") {
-        console.log("Target Initialized");
-        injectNetworkHook(); // Inject hook
+        console.log("[AgentAnything] Target Initialized");
+        injectNetworkHook();
         checkChanges();
         observer.observe(document.body, { subtree: true, childList: true, attributes: true, characterData: true });
     }

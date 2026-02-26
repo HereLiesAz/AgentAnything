@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "AgentAnything",
-  "version": "0.24.3",
-  "description": "Autonomous multi-agent browser orchestration. V2.4 (REST API Tool)",
+  "version": "1.0.0",
+  "description": "Autonomous multi-agent browser orchestration. Turn one tab into an AI agent, another into its tool.",
   "permissions": [
     "scripting",
     "tabs",
@@ -27,9 +27,9 @@
   },
   "options_page": "options.html",
   "icons": {
-      "16": "icons/icon16.png",
-      "48": "icons/icon48.png",
-      "128": "icons/icon128.png"
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
   },
   "content_scripts": [
     {
@@ -44,7 +44,7 @@
         "https://gemini.google.com/*",
         "https://aistudio.google.com/*"
       ],
-      "js": ["content/agent_bridge.js", "content/agent_dashboard.js"],
+      "js": ["content/agent_bridge.js"],
       "run_at": "document_idle"
     }
   ],
