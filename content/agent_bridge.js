@@ -1,39 +1,25 @@
 // content/agent_bridge.js
 
-let debuggerAttached = false;
+let attached = false;
 
 function attach() {
-  if (debuggerAttached) return;
-
+  if (attached) return;
   chrome.runtime.sendMessage({ type: "ATTACH_DEBUGGER" });
-  debuggerAttached = true;
+  attached = true;
 }
 
 function detach() {
-  if (!debuggerAttached) return;
-
+  if (!attached) return;
   chrome.runtime.sendMessage({ type: "DETACH_DEBUGGER" });
-  debuggerAttached = false;
+  attached = false;
 }
 
 chrome.runtime.onMessage.addListener((message) => {
-  if (message.type === "NETWORK_REQUEST") {
-    window.postMessage({
-      source: "AgentAnything",
-      type: "NETWORK_REQUEST",
-      payload: message.data
-    });
-  }
-
-  if (message.type === "NETWORK_RESPONSE") {
-    window.postMessage({
-      source: "AgentAnything",
-      type: "NETWORK_RESPONSE",
-      payload: message.data
-    });
-  }
+  window.postMessage({
+    source: "AgentAnything",
+    ...message
+  });
 });
 
 attach();
-
 window.addEventListener("beforeunload", detach);
