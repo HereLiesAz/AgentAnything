@@ -1,14 +1,14 @@
 // content/agent_bridge.js
 
 (function () {
-chrome.tabs.onRemoved.addListener((tabId) => {
-  if (AA_DEBUG_SESSIONS.has(tabId)) {
-    try {
-      chrome.debugger.detach({ tabId });
-    } catch (_) {}
-    AA_DEBUG_SESSIONS.delete(tabId);
-  }
-});
+//chrome.tabs.onRemoved.addListener((tabId) => {
+//  if (AA_DEBUG_SESSIONS.has(tabId)) {
+//    try {
+//      chrome.debugger.detach({ tabId });
+//    } catch (_) {}
+//    AA_DEBUG_SESSIONS.delete(tabId);
+//  }
+//});
   if (window.__AA_BRIDGE__) return;
   window.__AA_BRIDGE__ = true;
 
