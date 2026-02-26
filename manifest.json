@@ -1,57 +1,28 @@
 {
   "manifest_version": 3,
   "name": "AgentAnything",
-  "version": "1.0.0",
-  "description": "Autonomous multi-agent browser orchestration. Turn one tab into an AI agent, another into its tool.",
+  "version": "1.0",
+  "description": "AI network inspection via Chrome DevTools Protocol",
   "permissions": [
-    "scripting",
+    "debugger",
     "tabs",
     "storage",
-    "offscreen",
-    "debugger"
+    "activeTab"
   ],
   "host_permissions": [
     "<all_urls>"
   ],
   "background": {
-    "service_worker": "background.js",
-    "type": "module"
+    "service_worker": "background.js"
   },
   "action": {
-    "default_popup": "popup.html",
-    "default_icon": {
-      "16": "icons/icon16.png",
-      "48": "icons/icon48.png",
-      "128": "icons/icon128.png"
-    }
-  },
-  "options_page": "options.html",
-  "icons": {
-    "16": "icons/icon16.png",
-    "48": "icons/icon48.png",
-    "128": "icons/icon128.png"
+    "default_popup": "popup.html"
   },
   "content_scripts": [
     {
       "matches": ["<all_urls>"],
-      "js": ["content/target_adapter.js", "content/agent_dashboard.js"],
+      "js": ["content/agent_bridge.js", "content/agent_dashboard.js"],
       "run_at": "document_idle"
-    },
-    {
-      "matches": [
-        "https://chatgpt.com/*",
-        "https://claude.ai/*",
-        "https://gemini.google.com/*",
-        "https://aistudio.google.com/*"
-      ],
-      "js": ["content/agent_bridge.js"],
-      "run_at": "document_idle"
-    }
-  ],
-  "web_accessible_resources": [
-    {
-      "resources": ["assets/*", "content/network_hook.js"],
-      "matches": ["<all_urls>"]
     }
   ]
 }
