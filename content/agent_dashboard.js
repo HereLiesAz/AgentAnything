@@ -1,36 +1,53 @@
 // content/agent_dashboard.js
 
-const panel = document.createElement("div");
-panel.style.position = "fixed";
-panel.style.bottom = "20px";
-panel.style.right = "20px";
-panel.style.width = "300px";
-panel.style.height = "200px";
-panel.style.background = "#111";
-panel.style.color = "#fff";
-panel.style.zIndex = "999999";
-panel.style.overflow = "auto";
-panel.style.padding = "10px";
-panel.innerText = "AgentAnything Network Monitor";
+(function() {
 
-document.body.appendChild(panel);
+  if (window.__AA_DASHBOARD__) return;
+  window.__AA_DASHBOARD__ = true;
 
-window.addEventListener("message", (event) => {
-  if (event.data?.source !== "AgentAnything") return;
+  const dashboard = document.createElement('div');
+  dashboard.id = 'aa-dashboard-root';
 
-  const entry = document.createElement("div");
-  entry.style.fontSize = "10px";
-  entry.style.marginBottom = "4px";
+  Object.assign(dashboard.style, {
+    position: 'fixed',
+    bottom: '20px',
+    right: '20px',
+    width: '280px',
+    height: '160px',
+    background: 'rgba(20,20,20,0.95)',
+    color: '#fff',
+    fontSize: '12px',
+    fontFamily: 'monospace',
+    borderRadius: '8px',
+    padding: '10px',
+    zIndex: 999999999,
+    boxShadow: '0 4px 12px rgba(0,0,0,0.4)',
+    overflow: 'hidden'
+  });
 
-  if (event.data.type === "NETWORK_REQUEST") {
-    entry.innerText = "REQ: " + event.data.payload.request.url;
-  }
+  dashboard.innerHTML = `
+    <div style="font-weight:bold;margin-bottom:6px;">AgentAnything</div>
+    <div id="aa-status">Status: Idle</div>
+    <div id="aa-network">Network: Off</div>
+  `;
 
-  if (event.data.type === "NETWORK_RESPONSE") {
-    entry.innerText = "RES: " + event.data.payload.response.url;
-  }
+  document.documentElement.appendChild(dashboard);
 
-  panel.appendChild(entry);
-});
+  // Safe touch listener (PASSIVE)
+  dashboard.addEventListener(
+    "touchstart",
+    () => {},
+    { passive: true }
+  );
 
-panel.addEventListener("touchstart", () => {}, { passive: true });
+  // Example state listener
+  chrome.runtime.onMessage.addListener((msg) => {
+
+    if (msg.type === "AA_NETWORK_REQUEST") {
+      const el = document.getElementById("aa-network");
+      if (el) el.textContent = "Network: Active";
+    }
+
+  });
+
+})();
