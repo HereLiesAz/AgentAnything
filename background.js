@@ -1,47 +1,53 @@
-// background.js
+// =============================
+// NETWORK CDP LAYER (AgentAnything)
+// =============================
 
-const attachedTabs = new Map(); 
-// tabId -> { requests: Map<requestId, metadata> }
+const AA_DEBUG_SESSIONS = new Map();
+// tabId -> { requestMap: Map }
 
-const FILTERS = {
-  urlIncludes: [],       // ["api", "graphql"]
-  urlRegex: null,        // /api\/v1\//
-  methods: [],           // ["POST"]
-  resourceTypes: []      // ["XHR", "Fetch"]
+const AA_FILTERS = {
+  enabled: true,
+  urlIncludes: [],
+  urlRegex: null,
+  methods: [],
+  resourceTypes: [],
+  captureBodies: false
 };
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   const tabId = sender.tab?.id;
-
   if (!tabId) return;
 
-  if (message.type === "ATTACH_DEBUGGER") {
-    attachDebugger(tabId);
+  if (message.type === "AA_ATTACH_NETWORK") {
+    attachNetwork(tabId);
     sendResponse({ success: true });
   }
 
-  if (message.type === "DETACH_DEBUGGER") {
-    detachDebugger(tabId);
+  if (message.type === "AA_DETACH_NETWORK") {
+    detachNetwork(tabId);
     sendResponse({ success: true });
   }
 
-  if (message.type === "SET_FILTERS") {
-    updateFilters(message.filters);
+  if (message.type === "AA_SET_NETWORK_FILTERS") {
+    updateNetworkFilters(message.filters || {});
     sendResponse({ success: true });
   }
 });
 
-function updateFilters(newFilters) {
-  FILTERS.urlIncludes = newFilters.urlIncludes || [];
-  FILTERS.methods = newFilters.methods || [];
-  FILTERS.resourceTypes = newFilters.resourceTypes || [];
-  FILTERS.urlRegex = newFilters.urlRegex
-    ? new RegExp(newFilters.urlRegex)
+function updateNetworkFilters(filters) {
+  AA_FILTERS.enabled = filters.enabled ?? true;
+  AA_FILTERS.urlIncludes = filters.urlIncludes || [];
+  AA_FILTERS.methods = filters.methods || [];
+  AA_FILTERS.resourceTypes = filters.resourceTypes || [];
+  AA_FILTERS.captureBodies = filters.captureBodies || false;
+
+  AA_FILTERS.urlRegex = filters.urlRegex
+    ? new RegExp(filters.urlRegex)
     : null;
 }
 
-async function attachDebugger(tabId) {
-  if (attachedTabs.has(tabId)) return;
+async function attachNetwork(tabId) {
+  if (AA_DEBUG_SESSIONS.has(tabId)) return;
 
   try {
     await chrome.debugger.attach({ tabId }, "1.3");
@@ -51,64 +57,61 @@ async function attachDebugger(tabId) {
       maxResourceBufferSize: 50000000
     });
 
-    attachedTabs.set(tabId, {
-      requests: new Map()
+    AA_DEBUG_SESSIONS.set(tabId, {
+      requestMap: new Map()
     });
 
-    chrome.debugger.onEvent.addListener(handleDebuggerEvent);
+    chrome.debugger.onEvent.addListener(handleNetworkEvent);
 
-    console.log("CDP attached:", tabId);
   } catch (err) {
-    console.error("Attach failed:", err);
+    console.error("AA attach failed:", err);
   }
 }
 
-async function detachDebugger(tabId) {
-  if (!attachedTabs.has(tabId)) return;
+async function detachNetwork(tabId) {
+  if (!AA_DEBUG_SESSIONS.has(tabId)) return;
 
   try {
     await chrome.debugger.detach({ tabId });
-    attachedTabs.delete(tabId);
-    console.log("CDP detached:", tabId);
-  } catch (err) {
-    console.error("Detach failed:", err);
-  }
+  } catch (_) {}
+
+  AA_DEBUG_SESSIONS.delete(tabId);
 }
 
-function handleDebuggerEvent(source, method, params) {
+function handleNetworkEvent(source, method, params) {
   const tabId = source.tabId;
-  if (!attachedTabs.has(tabId)) return;
+  if (!AA_DEBUG_SESSIONS.has(tabId)) return;
+  if (!AA_FILTERS.enabled) return;
 
-  const tabData = attachedTabs.get(tabId);
+  const session = AA_DEBUG_SESSIONS.get(tabId);
 
   if (method === "Network.requestWillBeSent") {
     if (!passesFilter(params)) return;
 
-    tabData.requests.set(params.requestId, {
+    session.requestMap.set(params.requestId, {
       url: params.request.url,
       method: params.request.method,
       type: params.type
     });
 
-    forward(tabId, {
-      type: "NETWORK_REQUEST",
-      data: params
-    });
-  }
-
-  if (method === "Network.responseReceived") {
-    if (!tabData.requests.has(params.requestId)) return;
-
-    forward(tabId, {
-      type: "NETWORK_RESPONSE",
-      data: params
+    forwardToTab(tabId, {
+      type: "AA_NETWORK_REQUEST",
+      data: {
+        method: params.request.method,
+        url: params.request.url,
+        timestamp: Date.now()
+      }
     });
   }
 
   if (method === "Network.loadingFinished") {
-    if (!tabData.requests.has(params.requestId)) return;
+    if (!session.requestMap.has(params.requestId)) return;
 
-    captureResponseBody(tabId, params.requestId);
+    if (AA_FILTERS.captureBodies) {
+      captureResponseBody(tabId, params.requestId);
+    }
+
+    session.requestMap.delete(params.requestId);
   }
 }
 
@@ -116,24 +119,22 @@ function passesFilter(params) {
   const { url, method } = params.request;
   const type = params.type;
 
-  if (FILTERS.urlIncludes.length > 0) {
-    const match = FILTERS.urlIncludes.some(str =>
-      url.includes(str)
-    );
+  if (AA_FILTERS.urlIncludes.length > 0) {
+    const match = AA_FILTERS.urlIncludes.some(str => url.includes(str));
     if (!match) return false;
   }
 
-  if (FILTERS.urlRegex && !FILTERS.urlRegex.test(url)) {
+  if (AA_FILTERS.urlRegex && !AA_FILTERS.urlRegex.test(url)) {
     return false;
   }
 
-  if (FILTERS.methods.length > 0 &&
-      !FILTERS.methods.includes(method)) {
+  if (AA_FILTERS.methods.length > 0 &&
+      !AA_FILTERS.methods.includes(method)) {
     return false;
   }
 
-  if (FILTERS.resourceTypes.length > 0 &&
-      !FILTERS.resourceTypes.includes(type)) {
+  if (AA_FILTERS.resourceTypes.length > 0 &&
+      !AA_FILTERS.resourceTypes.includes(type)) {
     return false;
   }
 
@@ -148,20 +149,20 @@ async function captureResponseBody(tabId, requestId) {
       { requestId }
     );
 
-    forward(tabId, {
-      type: "NETWORK_BODY",
+    forwardToTab(tabId, {
+      type: "AA_NETWORK_BODY",
       data: {
         requestId,
-        body: response.body,
+        body: response.body.slice(0, 10000),
         base64Encoded: response.base64Encoded
       }
     });
 
   } catch (err) {
-    console.warn("Body capture failed:", err.message);
+    console.warn("AA body capture failed:", err.message);
   }
 }
 
-function forward(tabId, payload) {
+function forwardToTab(tabId, payload) {
   chrome.tabs.sendMessage(tabId, payload).catch(() => {});
 }
