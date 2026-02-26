@@ -194,12 +194,14 @@ async function assignTarget(tabId) {
 
 async function disengageAll() {
   const state = await getState();
+
   // Detach debugger from all target tabs
   for (const t of state.targetTabs) {
     try {
       await chrome.debugger.detach({ tabId: t.tabId });
     } catch (_) {}
   }
+
   // Clear state
   await updateState({
     agentTabId: null,
@@ -209,6 +211,22 @@ async function disengageAll() {
     observationMode: false,
     sessionKeyword: null
   });
+
+  // Send "disengaged" status to all tabs (so dashboards reset)
+  const allTabs = await chrome.tabs.query({});
+  for (const tab of allTabs) {
+    try {
+      await chrome.tabs.sendMessage(tab.id, {
+        action: 'DASHBOARD_UPDATE',
+        status: 'Disengaged',
+        color: '#888',
+        queueLength: 0,
+        lastAction: 0,
+        isAgentTab: false,
+        allowInput: true
+      });
+    } catch (_) {}
+  }
 }
 
 // -------------------- Tool Management --------------------
