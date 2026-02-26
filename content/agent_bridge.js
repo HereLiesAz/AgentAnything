@@ -1,25 +1,31 @@
-// content/agent_bridge.js
+// AgentAnything Bridge (Content Script)
 
-let attached = false;
+let networkAttached = false;
 
-function attach() {
-  if (attached) return;
-  chrome.runtime.sendMessage({ type: "ATTACH_DEBUGGER" });
-  attached = true;
+function attachNetwork() {
+  if (networkAttached) return;
+  chrome.runtime.sendMessage({ type: "AA_ATTACH_NETWORK" });
+  networkAttached = true;
 }
 
-function detach() {
-  if (!attached) return;
-  chrome.runtime.sendMessage({ type: "DETACH_DEBUGGER" });
-  attached = false;
+function detachNetwork() {
+  if (!networkAttached) return;
+  chrome.runtime.sendMessage({ type: "AA_DETACH_NETWORK" });
+  networkAttached = false;
 }
 
 chrome.runtime.onMessage.addListener((message) => {
-  window.postMessage({
-    source: "AgentAnything",
-    ...message
-  });
+
+  if (message.type === "AA_NETWORK_REQUEST" ||
+      message.type === "AA_NETWORK_BODY") {
+
+    window.postMessage({
+      source: "AA_CDP",
+      ...message
+    }, window.location.origin);
+  }
+
 });
 
-attach();
-window.addEventListener("beforeunload", detach);
+attachNetwork();
+window.addEventListener("beforeunload", detachNetwork);
